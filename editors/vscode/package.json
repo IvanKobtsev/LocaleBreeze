@@ -4,6 +4,10 @@
   "description": "Context-aware i18n navigation and completion powered by LocaleBreeze.",
   "version": "0.1.0",
   "publisher": "ivankobtsev",
+  "repository": { "type": "git", "url": "https://github.com/IvanKobtsev/LocaleBreeze.git" },
+  "homepage": "https://github.com/IvanKobtsev/LocaleBreeze#readme",
+  "bugs": "https://github.com/IvanKobtsev/LocaleBreeze/issues",
+  "keywords": ["i18n", "localization", "typescript", "translation", "lsp"],
   "packageManager": "pnpm@11.19.0",
   "license": "MIT",
   "engines": { "vscode": "^1.95.0" },
@@ -35,7 +39,8 @@
   "scripts": {
     "compile": "esbuild src/extension.ts --bundle --platform=node --external:vscode --outfile=dist/extension.js",
     "check": "tsc --noEmit",
-    "package": "vsce package"
+    "package": "vsce package",
+    "package:editors": "node ../../scripts/package-editors.mjs"
   },
   "dependencies": { "vscode-languageclient": "^9.0.1" },
   "devDependencies": {

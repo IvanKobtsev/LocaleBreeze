@@ -13,6 +13,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     void vscode.window.showErrorMessage(`LocaleBreeze server was not found at ${executable}. Configure localeBreeze.server.path.`);
     return;
   }
+  if (process.platform !== 'win32') fs.chmodSync(executable, 0o755);
 
   const args = ['lsp', '--stdio'];
   const config = resolveConfig(settings.get<string>('configPath', '').trim());

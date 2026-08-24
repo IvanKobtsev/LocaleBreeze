@@ -9,7 +9,7 @@ LocaleBreeze is a cross-editor language server for context-aware i18n navigation
 - Find References from dictionary properties back to full and scoped calls.
 - Optional unused-key hints on unreferenced default-locale dictionary leaves.
 - Incremental synchronization for TypeScript, TSX, JavaScript, JSX, and translation JSON.
-- Thin VS Code integration; no project source or translations leave the machine.
+- Thin VS Code and WebStorm integrations; no project source or translations leave the machine.
 
 Supported source forms:
 
@@ -49,7 +49,17 @@ npm install --save-dev @locale-breeze/language-server
 npx locale-breeze lsp --stdio
 ```
 
-The npm launcher installs only the binary for the current operating system and architecture. Release tags publish six platform packages plus the launcher package through GitHub Actions with npm provenance.
+The npm launcher installs only the binary for the current operating system and architecture.
+
+## Package the editor integrations
+
+With the six native npm-package binaries populated and the VS Code dependencies installed, run:
+
+```text
+node scripts/package-editors.mjs
+```
+
+This produces six platform-specific VSIX files and one all-platform WebStorm plugin ZIP under `dist/editors/`. Pass `--vscode-only` or `--jetbrains-only` to build only one editor integration. The JetBrains build requires JDK 25 through `JAVA_HOME`.
 
 For VS Code development, install the dependencies in `editors/vscode`, run its compile script, and either copy the server into `bin/<platform>-<arch>/` or set `localeBreeze.server.path`.
 
@@ -58,7 +68,7 @@ For VS Code development, install the dependencies in `editors/vscode`, run its c
 - One dictionary pattern and logical translation module per workspace.
 - String-valued JSON leaves only; arrays and non-string leaves are ignored.
 - No missing-key diagnostics, rename, hover, CodeLens, namespaces, or cross-file data-flow yet.
-- The JetBrains launcher is planned after the server protocol is stabilized.
+- The WebStorm launcher currently targets the 2026.2 IDE line.
 
 ## Development
 

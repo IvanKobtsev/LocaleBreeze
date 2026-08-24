@@ -1,0 +1,26 @@
+<idea-plugin>
+  <id>dev.localebreeze.jetbrains</id>
+  <name>LocaleBreeze</name>
+  <vendor url="https://github.com/IvanKobtsev/LocaleBreeze">Ivan Kobtsev</vendor>
+  <description><![CDATA[
+    Context-aware i18n completion, navigation, references, and unused-key hints powered by the LocaleBreeze language server.
+  ]]></description>
+
+  <depends>com.intellij.modules.platform</depends>
+  <depends>com.intellij.modules.ultimate</depends>
+  <depends>com.intellij.modules.lsp</depends>
+  <depends>JavaScript</depends>
+
+  <extensions defaultExtensionNs="com.intellij">
+    <platform.lsp.integrationProvider implementation="dev.localebreeze.jetbrains.LocaleBreezeLspIntegrationProvider"/>
+    <gotoDeclarationHandler
+        implementation="dev.localebreeze.jetbrains.LocaleBreezeGotoDeclarationHandler"
+        order="first"/>
+    <postStartupActivity implementation="dev.localebreeze.jetbrains.LocaleBreezeProjectActivity"/>
+    <projectConfigurable
+        id="dev.localebreeze.jetbrains.settings"
+        displayName="LocaleBreeze"
+        instance="dev.localebreeze.jetbrains.LocaleBreezeConfigurable"/>
+    <notificationGroup id="LocaleBreeze" displayType="BALLOON"/>
+  </extensions>
+</idea-plugin>
