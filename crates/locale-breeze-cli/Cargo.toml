@@ -1,0 +1,15 @@
+[package]
+name = "locale-breeze"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+locale-breeze-lsp = { path = "../locale-breeze-lsp" }
+tracing-subscriber.workspace = true
+
+[[bin]]
+name = "locale-breeze"
+path = "src/main.rs"
+

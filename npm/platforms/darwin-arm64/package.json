@@ -1,0 +1,25 @@
+{
+    "name": "@locale-breeze/language-server-darwin-arm64",
+    "version": "0.1.1",
+    "description": "LocaleBreeze binary for macOS ARM64",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/IvanKobtsev/LocaleBreeze.git"
+    },
+    "os": [
+        "darwin"
+    ],
+    "cpu": [
+        "arm64"
+    ],
+    "bin": {
+        "locale-breeze-language-server-native-darwin-arm64": "bin/locale-breeze"
+    },
+    "files": [
+        "bin/locale-breeze"
+    ],
+    "publishConfig": {
+        "access": "public"
+    }
+}

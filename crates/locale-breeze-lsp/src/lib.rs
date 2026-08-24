@@ -1,0 +1,436 @@
+use anyhow::Result;
+use locale_breeze_core::{
+    ByteRange, CanonicalKey, EntryKind, IndexSnapshot, LineIndex, OccurrenceKind, WorkspaceIndex,
+};
+use lsp_server::{Connection, Message, Notification, Request, Response};
+use lsp_types::*;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use serde::de::DeserializeOwned;
+use serde_json::Value;
+use std::path::PathBuf;
+use std::sync::Arc;
+use url::Url;
+
+pub fn run_stdio(config_override: Option<PathBuf>) -> Result<()> {
+    let (connection, io_threads) = Connection::stdio();
+    let capabilities = ServerCapabilities {
+        text_document_sync: Some(TextDocumentSyncCapability::Kind(
+            TextDocumentSyncKind::INCREMENTAL,
+        )),
+        completion_provider: Some(CompletionOptions {
+            trigger_characters: Some(vec!["\"".into(), "'".into(), ".".into()]),
+            ..Default::default()
+        }),
+        definition_provider: Some(OneOf::Left(true)),
+        references_provider: Some(OneOf::Left(true)),
+        workspace: Some(WorkspaceServerCapabilities {
+            workspace_folders: Some(WorkspaceFoldersServerCapabilities {
+                supported: Some(true),
+                change_notifications: Some(OneOf::Left(true)),
+            }),
+            file_operations: None,
+        }),
+        ..Default::default()
+    };
+    let params: InitializeParams =
+        serde_json::from_value(connection.initialize(serde_json::to_value(capabilities)?)?)?;
+    let mut server = Server::new(config_override);
+    server.initialize(&connection, &params);
+    server.event_loop(&connection)?;
+    io_threads.join()?;
+    Ok(())
+}
+
+struct Server {
+    workspaces: Vec<Arc<WorkspaceIndex>>,
+    watchers: Vec<RecommendedWatcher>,
+    config_override: Option<PathBuf>,
+}
+
+impl Server {
+    fn new(config_override: Option<PathBuf>) -> Self {
+        Self {
+            workspaces: vec![],
+            watchers: vec![],
+            config_override,
+        }
+    }
+
+    #[allow(deprecated)]
+    fn initialize(&mut self, connection: &Connection, params: &InitializeParams) {
+        let roots: Vec<Url> = params
+            .workspace_folders
+            .as_ref()
+            .map(|folders| folders.iter().map(|f| f.uri.clone()).collect())
+            .or_else(|| params.root_uri.clone().map(|u| vec![u]))
+            .unwrap_or_default();
+        for root in roots {
+            self.add_workspace(connection, root);
+        }
+    }
+
+    fn add_workspace(&mut self, connection: &Connection, uri: Url) {
+        let Ok(root) = uri.to_file_path() else { return };
+        if self.workspaces.iter().any(|w| w.root() == root) {
+            return;
+        }
+        let config_path = self
+            .config_override
+            .clone()
+            .unwrap_or_else(|| root.join("locale-breeze.json"));
+        match WorkspaceIndex::load(root.clone(), &config_path) {
+            Ok(workspace) => {
+                let workspace = Arc::new(workspace);
+                let watched = workspace.clone();
+                match notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+                    if let Ok(event) = event {
+                        for path in event.paths {
+                            watched.refresh_disk_path(&path);
+                        }
+                    }
+                }) {
+                    Ok(mut watcher) => {
+                        if watcher.watch(&root, RecursiveMode::Recursive).is_ok() {
+                            self.watchers.push(watcher);
+                        }
+                    }
+                    Err(error) => log(
+                        connection,
+                        MessageType::WARNING,
+                        format!("LocaleBreeze could not watch {}: {error}", root.display()),
+                    ),
+                }
+                log(
+                    connection,
+                    MessageType::INFO,
+                    format!("LocaleBreeze indexed {}", root.display()),
+                );
+                self.workspaces.push(workspace);
+                self.workspaces
+                    .sort_by_key(|w| std::cmp::Reverse(w.root().components().count()));
+            }
+            Err(error) => log(
+                connection,
+                MessageType::ERROR,
+                format!("LocaleBreeze disabled for {}: {error}", root.display()),
+            ),
+        }
+    }
+
+    fn workspace_for_uri(&self, uri: &Url) -> Option<&Arc<WorkspaceIndex>> {
+        let path = uri.to_file_path().ok()?;
+        self.workspaces.iter().find(|w| path.starts_with(w.root()))
+    }
+
+    fn reload_workspaces(&mut self, connection: &Connection) {
+        let roots: Vec<_> = self
+            .workspaces
+            .iter()
+            .filter_map(|workspace| Url::from_file_path(workspace.root()).ok())
+            .collect();
+        self.workspaces.clear();
+        self.watchers.clear();
+        for root in roots {
+            self.add_workspace(connection, root);
+        }
+    }
+
+    fn event_loop(&mut self, connection: &Connection) -> Result<()> {
+        for message in &connection.receiver {
+            match message {
+                Message::Request(request) => {
+                    if connection.handle_shutdown(&request)? {
+                        return Ok(());
+                    }
+                    let response = self.handle_request(request);
+                    connection.sender.send(Message::Response(response))?;
+                }
+                Message::Notification(notification) => {
+                    self.handle_notification(connection, notification)
+                }
+                Message::Response(_) => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_request(&self, request: Request) -> Response {
+        let id = request.id.clone();
+        let result = match request.method.as_str() {
+            "textDocument/completion" => parse::<CompletionParams>(request.params)
+                .and_then(|p| serialize_optional(self.completion(p)?)),
+            "textDocument/definition" => parse::<GotoDefinitionParams>(request.params)
+                .and_then(|p| serialize_optional(self.definition(p)?)),
+            "textDocument/references" => parse::<ReferenceParams>(request.params)
+                .and_then(|p| serialize_optional(self.references(p)?)),
+            _ => {
+                return Response::new_err(
+                    id,
+                    lsp_server::ErrorCode::MethodNotFound as i32,
+                    format!("unsupported request: {}", request.method),
+                );
+            }
+        };
+        match result {
+            Ok(Some(value)) => Response::new_ok(id, value),
+            Ok(None) => Response::new_ok(id, Value::Null),
+            Err(error) => Response::new_err(
+                id,
+                lsp_server::ErrorCode::InvalidParams as i32,
+                error.to_string(),
+            ),
+        }
+    }
+
+    #[allow(clippy::collapsible_if)]
+    fn handle_notification(&mut self, connection: &Connection, notification: Notification) {
+        match notification.method.as_str() {
+            "textDocument/didOpen" => {
+                if let Ok(p) = parse::<DidOpenTextDocumentParams>(notification.params) {
+                    if let Some(w) = self.workspace_for_uri(&p.text_document.uri) {
+                        w.update_text(
+                            p.text_document.uri,
+                            p.text_document.text,
+                            Some(p.text_document.version),
+                        );
+                    }
+                }
+            }
+            "textDocument/didChange" => {
+                if let Ok(p) = parse::<DidChangeTextDocumentParams>(notification.params) {
+                    if let Some(w) = self.workspace_for_uri(&p.text_document.uri) {
+                        let snapshot = w.snapshot();
+                        if let Some(text) = snapshot.text(&p.text_document.uri) {
+                            let updated = apply_changes(text.to_owned(), &p.content_changes);
+                            w.update_text(
+                                p.text_document.uri,
+                                updated,
+                                Some(p.text_document.version),
+                            );
+                        }
+                    }
+                }
+            }
+            "textDocument/didClose" => {
+                if let Ok(p) = parse::<DidCloseTextDocumentParams>(notification.params) {
+                    if let Some(w) = self.workspace_for_uri(&p.text_document.uri) {
+                        w.close_document(&p.text_document.uri);
+                    }
+                }
+            }
+            "workspace/didChangeWorkspaceFolders" => {
+                if let Ok(p) = parse::<DidChangeWorkspaceFoldersParams>(notification.params) {
+                    for removed in p.event.removed {
+                        if let Ok(path) = removed.uri.to_file_path() {
+                            self.workspaces.retain(|w| w.root() != path);
+                        }
+                    }
+                    for added in p.event.added {
+                        self.add_workspace(connection, added.uri);
+                    }
+                }
+            }
+            "workspace/didChangeConfiguration" => {
+                self.reload_workspaces(connection);
+            }
+            "workspace/didChangeWatchedFiles" => {
+                if let Ok(params) = parse::<DidChangeWatchedFilesParams>(notification.params)
+                    && params.changes.iter().any(|change| {
+                        change
+                            .uri
+                            .path_segments()
+                            .and_then(Iterator::last)
+                            .is_some_and(|name| name == "locale-breeze.json")
+                    })
+                {
+                    self.reload_workspaces(connection);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let Some(workspace) = self.workspace_for_uri(&uri) else {
+            return Ok(None);
+        };
+        let snapshot = workspace.snapshot();
+        let Some(offset) = position_offset(&snapshot, &uri, position) else {
+            return Ok(None);
+        };
+        let Some(context) = snapshot.completion_context_at(&uri, offset, workspace.config()) else {
+            return Ok(None);
+        };
+        let (candidates, incomplete) = snapshot.completions(
+            &context,
+            &workspace.config().default_locale,
+            &workspace.config().key_separator,
+            100,
+        );
+        let items = candidates
+            .into_iter()
+            .map(|candidate| CompletionItem {
+                label: match &candidate.detail {
+                    Some(value) => format!("{} — {}", candidate.key, value),
+                    None => candidate.key.clone(),
+                },
+                kind: Some(CompletionItemKind::PROPERTY),
+                detail: Some(candidate.canonical_key),
+                filter_text: Some(candidate.key.clone()),
+                insert_text: Some(candidate.key),
+                sort_text: Some(format!("{:05}", 10_000i64.saturating_sub(candidate.score))),
+                ..Default::default()
+            })
+            .collect();
+        Ok(Some(CompletionResponse::List(CompletionList {
+            is_incomplete: incomplete,
+            items,
+        })))
+    }
+
+    fn definition(&self, params: GotoDefinitionParams) -> Result<Option<GotoDefinitionResponse>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+        let Some(workspace) = self.workspace_for_uri(&uri) else {
+            return Ok(None);
+        };
+        let snapshot = workspace.snapshot();
+        let Some(key) = key_at_position(&snapshot, &uri, position) else {
+            return Ok(None);
+        };
+        let mut entries = snapshot.dictionary_entries(&key).to_vec();
+        entries.sort_by_key(|e| {
+            (
+                e.locale != workspace.config().default_locale,
+                e.locale.clone(),
+            )
+        });
+        let locations = entries
+            .iter()
+            .filter_map(|e| location(&snapshot, &e.uri, &e.key_range))
+            .collect::<Vec<_>>();
+        Ok((!locations.is_empty()).then_some(GotoDefinitionResponse::Array(locations)))
+    }
+
+    fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let Some(workspace) = self.workspace_for_uri(&uri) else {
+            return Ok(None);
+        };
+        let snapshot = workspace.snapshot();
+        let Some(key) = key_at_position(&snapshot, &uri, position) else {
+            return Ok(None);
+        };
+        let is_scope = snapshot
+            .dictionary_entries(&key)
+            .iter()
+            .any(|e| e.kind == EntryKind::Object)
+            || snapshot
+                .occurrence_at(
+                    &uri,
+                    position_offset(&snapshot, &uri, position).unwrap_or(usize::MAX),
+                )
+                .is_some_and(|o| o.kind == OccurrenceKind::ScopeDeclaration);
+        let occurrences: Vec<_> = if is_scope {
+            snapshot.immediate_child_occurrences(&key, &workspace.config().key_separator)
+        } else {
+            snapshot.occurrences(&key).iter().collect()
+        };
+        let mut locations: Vec<_> = occurrences
+            .into_iter()
+            .filter_map(|o| location(&snapshot, &o.uri, &o.range))
+            .collect();
+        if params.context.include_declaration {
+            locations.extend(
+                snapshot
+                    .dictionary_entries(&key)
+                    .iter()
+                    .filter_map(|e| location(&snapshot, &e.uri, &e.key_range)),
+            );
+        }
+        Ok(Some(locations))
+    }
+}
+
+fn parse<T: DeserializeOwned>(value: Value) -> Result<T> {
+    Ok(serde_json::from_value(value)?)
+}
+
+fn serialize_optional<T: serde::Serialize>(value: Option<T>) -> Result<Option<Value>> {
+    value
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(Into::into)
+}
+
+fn position_offset(snapshot: &IndexSnapshot, uri: &Url, position: Position) -> Option<usize> {
+    let text = snapshot.text(uri)?;
+    LineIndex::new(text).offset(text, position.line, position.character)
+}
+
+fn key_at_position(
+    snapshot: &IndexSnapshot,
+    uri: &Url,
+    position: Position,
+) -> Option<CanonicalKey> {
+    let offset = position_offset(snapshot, uri, position)?;
+    snapshot
+        .occurrence_at(uri, offset)
+        .map(|o| o.key.clone())
+        .or_else(|| snapshot.dictionary_at(uri, offset).map(|e| e.key.clone()))
+}
+
+fn location(snapshot: &IndexSnapshot, uri: &Url, range: &ByteRange) -> Option<Location> {
+    let text = snapshot.text(uri)?;
+    let index = LineIndex::new(text);
+    let (sl, sc) = index.position(text, range.0.start)?;
+    let (el, ec) = index.position(text, range.0.end)?;
+    Some(Location::new(
+        uri.clone(),
+        Range::new(Position::new(sl, sc), Position::new(el, ec)),
+    ))
+}
+
+fn apply_changes(mut text: String, changes: &[TextDocumentContentChangeEvent]) -> String {
+    for change in changes {
+        if let Some(range) = change.range {
+            let index = LineIndex::new(&text);
+            if let (Some(start), Some(end)) = (
+                index.offset(&text, range.start.line, range.start.character),
+                index.offset(&text, range.end.line, range.end.character),
+            ) {
+                text.replace_range(start..end, &change.text);
+            }
+        } else {
+            text = change.text.clone();
+        }
+    }
+    text
+}
+
+fn log(connection: &Connection, typ: MessageType, message: String) {
+    let params = LogMessageParams { typ, message };
+    let notification = Notification::new("window/logMessage".into(), params);
+    let _ = connection.sender.send(Message::Notification(notification));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn applies_utf16_incremental_edits() {
+        let text = "const x = '😀';".to_owned();
+        let changed = apply_changes(
+            text,
+            &[TextDocumentContentChangeEvent {
+                range: Some(Range::new(Position::new(0, 11), Position::new(0, 13))),
+                range_length: Some(2),
+                text: "ok".into(),
+            }],
+        );
+        assert_eq!(changed, "const x = 'ok';");
+    }
+}

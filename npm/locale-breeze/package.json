@@ -1,0 +1,26 @@
+{
+  "name": "@locale-breeze/language-server",
+  "version": "0.1.1",
+  "description": "Context-aware i18n language server for TS, JS, and JSON",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/IvanKobtsev/LocaleBreeze.git"
+  },
+  "homepage": "https://github.com/IvanKobtsev/LocaleBreeze#readme",
+  "bugs": "https://github.com/IvanKobtsev/LocaleBreeze/issues",
+  "type": "commonjs",
+  "main": "index.js",
+  "bin": { "locale-breeze": "cli.js" },
+  "files": ["cli.js", "index.js", "README.md"],
+  "engines": { "node": ">=18" },
+  "optionalDependencies": {
+    "@locale-breeze/language-server-win32-x64": "0.1.1",
+    "@locale-breeze/language-server-win32-arm64": "0.1.1",
+    "@locale-breeze/language-server-darwin-x64": "0.1.1",
+    "@locale-breeze/language-server-darwin-arm64": "0.1.1",
+    "@locale-breeze/language-server-linux-x64": "0.1.1",
+    "@locale-breeze/language-server-linux-arm64": "0.1.1"
+  },
+  "publishConfig": { "access": "public" }
+}

@@ -1,0 +1,45 @@
+{
+  "name": "locale-breeze",
+  "displayName": "LocaleBreeze",
+  "description": "Context-aware i18n navigation and completion powered by LocaleBreeze.",
+  "version": "0.1.0",
+  "publisher": "ivankobtsev",
+  "packageManager": "pnpm@11.19.0",
+  "license": "MIT",
+  "engines": { "vscode": "^1.95.0" },
+  "categories": ["Programming Languages", "Other"],
+  "activationEvents": [
+    "onLanguage:typescript", "onLanguage:typescriptreact", "onLanguage:javascript",
+    "onLanguage:javascriptreact", "onLanguage:json"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "LocaleBreeze",
+      "properties": {
+        "localeBreeze.server.path": {
+          "type": "string", "default": "",
+          "description": "Optional path to a LocaleBreeze server binary. The bundled binary is used when empty."
+        },
+        "localeBreeze.server.trace": {
+          "type": "string", "enum": ["off", "messages", "verbose"], "default": "off",
+          "description": "Language-server protocol trace level."
+        },
+        "localeBreeze.configPath": {
+          "type": "string", "default": "",
+          "description": "Optional configuration path. Relative paths are resolved from the first workspace folder."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "esbuild src/extension.ts --bundle --platform=node --external:vscode --outfile=dist/extension.js",
+    "check": "tsc --noEmit",
+    "package": "vsce package"
+  },
+  "dependencies": { "vscode-languageclient": "^9.0.1" },
+  "devDependencies": {
+    "@types/node": "^22.0.0", "@types/vscode": "^1.95.0",
+    "@vscode/vsce": "^3.2.1", "esbuild": "^0.25.0", "typescript": "^5.7.0"
+  }
+}

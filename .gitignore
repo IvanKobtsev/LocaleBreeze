@@ -1,0 +1,10 @@
+/target/
+/target-docker-xwin/
+**/node_modules/
+**/dist/
+**/*.vsix
+npm/platforms/*/bin/
+npm/*.tgz
+npm/**/*.tgz
+/artifacts/
+.DS_Store

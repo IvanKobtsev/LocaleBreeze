@@ -1,0 +1,16 @@
+[package]
+name = "locale-breeze-lsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+locale-breeze-core = { path = "../locale-breeze-core" }
+lsp-server.workspace = true
+lsp-types.workspace = true
+notify.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+url.workspace = true

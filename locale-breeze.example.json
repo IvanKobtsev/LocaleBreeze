@@ -1,0 +1,10 @@
+{
+  "$schema": "https://raw.githubusercontent.com/IvanKobtsev/LocaleBreeze/main/schemas/config-v1.schema.json",
+  "dictionaries": "public/dictionaries/translation.{locale}.json",
+  "defaultLocale": "en",
+  "keySeparator": ".",
+  "scopedFunctions": ["useScopedTranslation"],
+  "translationMethods": ["t"],
+  "fullKeyFunctions": ["i18next.t"]
+}
+

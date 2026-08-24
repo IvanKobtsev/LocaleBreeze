@@ -1,0 +1,25 @@
+{
+    "name": "@locale-breeze/language-server-win32-x64",
+    "version": "0.1.1",
+    "description": "LocaleBreeze binary for Windows x64",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/IvanKobtsev/LocaleBreeze.git"
+    },
+    "os": [
+        "win32"
+    ],
+    "cpu": [
+        "x64"
+    ],
+    "bin": {
+        "locale-breeze-language-server-native-win32-x64": "bin/locale-breeze.exe"
+    },
+    "files": [
+        "bin/locale-breeze.exe"
+    ],
+    "publishConfig": {
+        "access": "public"
+    }
+}

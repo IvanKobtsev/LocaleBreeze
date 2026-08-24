@@ -1,0 +1,35 @@
+[workspace]
+members = [
+  "crates/locale-breeze-core",
+  "crates/locale-breeze-lsp",
+  "crates/locale-breeze-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/IvanKobtsev/LocaleBreeze"
+
+[workspace.dependencies]
+anyhow = "1.0"
+arc-swap = "1.7"
+crossbeam-channel = "0.5"
+globset = "0.4"
+ignore = "0.4"
+lsp-server = "0.7"
+lsp-types = "0.95.1"
+notify = "8.2"
+schemars = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tree-sitter = "0.25"
+tree-sitter-json = "0.24"
+tree-sitter-typescript = "0.23"
+url = "2.5"
+walkdir = "2.5"
+

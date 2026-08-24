@@ -1,0 +1,25 @@
+{
+    "name": "@locale-breeze/language-server-linux-x64",
+    "version": "0.1.1",
+    "description": "LocaleBreeze binary for Linux x64",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/IvanKobtsev/LocaleBreeze.git"
+    },
+    "os": [
+        "linux"
+    ],
+    "cpu": [
+        "x64"
+    ],
+    "bin": {
+        "locale-breeze-language-server-native-linux-x64": "bin/locale-breeze"
+    },
+    "files": [
+        "bin/locale-breeze"
+    ],
+    "publishConfig": {
+        "access": "public"
+    }
+}
