@@ -12,13 +12,19 @@
     "keySeparator": { "type": "string", "minLength": 1, "default": "." },
     "scopedFunctions": { "$ref": "#/$defs/conventions" },
     "translationMethods": { "$ref": "#/$defs/conventions" },
-    "fullKeyFunctions": { "$ref": "#/$defs/conventions" }
+    "fullKeyFunctions": { "$ref": "#/$defs/conventions" },
+    "translationKeyTypes": { "$ref": "#/$defs/optionalConventions" },
+    "translationKeyProps": { "$ref": "#/$defs/optionalConventions" },
+    "unusedKeys": { "type": "boolean", "default": false }
   },
   "$defs": {
     "conventions": {
       "type": "array", "minItems": 1, "uniqueItems": true,
       "items": { "type": "string", "pattern": "^[^\\s.]+(?:\\.[^\\s.]+)*$" }
+    },
+    "optionalConventions": {
+      "type": "array", "uniqueItems": true, "default": [],
+      "items": { "type": "string", "pattern": "^[^\\s.]+(?:\\.[^\\s.]+)*$" }
     }
   }
 }
-

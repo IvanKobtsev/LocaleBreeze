@@ -5,6 +5,8 @@
   "keySeparator": ".",
   "scopedFunctions": ["useScopedTranslation"],
   "translationMethods": ["t"],
-  "fullKeyFunctions": ["i18next.t"]
+  "fullKeyFunctions": ["i18next.t"],
+  "translationKeyTypes": ["TranslationKey"],
+  "translationKeyProps": ["transKey"],
+  "unusedKeys": true
 }
-

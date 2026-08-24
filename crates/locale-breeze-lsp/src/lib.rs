@@ -7,6 +7,7 @@ use lsp_types::*;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use url::Url;
@@ -71,7 +72,7 @@ impl Server {
 
     fn add_workspace(&mut self, connection: &Connection, uri: Url) {
         let Ok(root) = uri.to_file_path() else { return };
-        if self.workspaces.iter().any(|w| w.root() == root) {
+        if self.workspaces.iter().any(|w| same_path(w.root(), &root)) {
             return;
         }
         let config_path = self
@@ -82,10 +83,21 @@ impl Server {
             Ok(workspace) => {
                 let workspace = Arc::new(workspace);
                 let watched = workspace.clone();
+                let sender = connection.sender.clone();
                 match notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
                     if let Ok(event) = event {
                         for path in event.paths {
+                            if let Ok(uri) = Url::from_file_path(&path) {
+                                let clear = Notification::new(
+                                    "textDocument/publishDiagnostics".into(),
+                                    PublishDiagnosticsParams::new(uri, Vec::new(), None),
+                                );
+                                let _ = sender.send(Message::Notification(clear));
+                            }
                             watched.refresh_disk_path(&path);
+                        }
+                        for notification in diagnostic_notifications(&watched) {
+                            let _ = sender.send(Message::Notification(notification));
                         }
                     }
                 }) {
@@ -108,6 +120,9 @@ impl Server {
                 self.workspaces.push(workspace);
                 self.workspaces
                     .sort_by_key(|w| std::cmp::Reverse(w.root().components().count()));
+                if let Some(workspace) = self.workspace_for_uri(&uri) {
+                    publish_diagnostics(connection, workspace);
+                }
             }
             Err(error) => log(
                 connection,
@@ -119,7 +134,9 @@ impl Server {
 
     fn workspace_for_uri(&self, uri: &Url) -> Option<&Arc<WorkspaceIndex>> {
         let path = uri.to_file_path().ok()?;
-        self.workspaces.iter().find(|w| path.starts_with(w.root()))
+        self.workspaces
+            .iter()
+            .find(|workspace| path_is_within(&path, workspace.root()))
     }
 
     fn reload_workspaces(&mut self, connection: &Connection) {
@@ -128,6 +145,9 @@ impl Server {
             .iter()
             .filter_map(|workspace| Url::from_file_path(workspace.root()).ok())
             .collect();
+        for workspace in &self.workspaces {
+            clear_diagnostics(connection, workspace);
+        }
         self.workspaces.clear();
         self.watchers.clear();
         for root in roots {
@@ -193,6 +213,7 @@ impl Server {
                             p.text_document.text,
                             Some(p.text_document.version),
                         );
+                        publish_diagnostics(connection, w);
                     }
                 }
             }
@@ -207,6 +228,7 @@ impl Server {
                                 updated,
                                 Some(p.text_document.version),
                             );
+                            publish_diagnostics(connection, w);
                         }
                     }
                 }
@@ -215,6 +237,7 @@ impl Server {
                 if let Ok(p) = parse::<DidCloseTextDocumentParams>(notification.params) {
                     if let Some(w) = self.workspace_for_uri(&p.text_document.uri) {
                         w.close_document(&p.text_document.uri);
+                        publish_diagnostics(connection, w);
                     }
                 }
             }
@@ -222,7 +245,15 @@ impl Server {
                 if let Ok(p) = parse::<DidChangeWorkspaceFoldersParams>(notification.params) {
                     for removed in p.event.removed {
                         if let Ok(path) = removed.uri.to_file_path() {
-                            self.workspaces.retain(|w| w.root() != path);
+                            for workspace in self
+                                .workspaces
+                                .iter()
+                                .filter(|w| same_path(w.root(), &path))
+                            {
+                                clear_diagnostics(connection, workspace);
+                            }
+                            self.workspaces
+                                .retain(|workspace| !same_path(workspace.root(), &path));
                         }
                     }
                     for added in p.event.added {
@@ -297,18 +328,15 @@ impl Server {
             return Ok(None);
         };
         let snapshot = workspace.snapshot();
-        let Some(key) = key_at_position(&snapshot, &uri, position) else {
+        let Some(key) =
+            key_at_position(&snapshot, &uri, position, &workspace.config().key_separator)
+        else {
             return Ok(None);
         };
-        let mut entries = snapshot.dictionary_entries(&key).to_vec();
-        entries.sort_by_key(|e| {
-            (
-                e.locale != workspace.config().default_locale,
-                e.locale.clone(),
-            )
-        });
-        let locations = entries
+        let locations = snapshot
+            .dictionary_entries(&key)
             .iter()
+            .filter(|entry| entry.locale == workspace.config().default_locale)
             .filter_map(|e| location(&snapshot, &e.uri, &e.key_range))
             .collect::<Vec<_>>();
         Ok((!locations.is_empty()).then_some(GotoDefinitionResponse::Array(locations)))
@@ -321,7 +349,9 @@ impl Server {
             return Ok(None);
         };
         let snapshot = workspace.snapshot();
-        let Some(key) = key_at_position(&snapshot, &uri, position) else {
+        let Some(key) =
+            key_at_position(&snapshot, &uri, position, &workspace.config().key_separator)
+        else {
             return Ok(None);
         };
         let is_scope = snapshot
@@ -335,7 +365,7 @@ impl Server {
                 )
                 .is_some_and(|o| o.kind == OccurrenceKind::ScopeDeclaration);
         let occurrences: Vec<_> = if is_scope {
-            snapshot.immediate_child_occurrences(&key, &workspace.config().key_separator)
+            snapshot.scope_occurrences(&key, &workspace.config().key_separator, 32)
         } else {
             snapshot.occurrences(&key).iter().collect()
         };
@@ -375,11 +405,33 @@ fn key_at_position(
     snapshot: &IndexSnapshot,
     uri: &Url,
     position: Position,
+    separator: &str,
 ) -> Option<CanonicalKey> {
     let offset = position_offset(snapshot, uri, position)?;
     snapshot
         .occurrence_at(uri, offset)
-        .map(|o| o.key.clone())
+        .and_then(|occurrence| {
+            let text = snapshot.text(uri)?;
+            let literal = text.get(occurrence.range.0.clone())?;
+            let cursor = offset
+                .saturating_sub(occurrence.range.0.start)
+                .min(literal.len());
+            let segment_index = literal.get(..cursor)?.matches(separator).count();
+
+            let (scope, key) = match (&occurrence.scope, &occurrence.relative_key) {
+                (Some(scope), Some(relative)) => (Some(scope), relative.as_str()),
+                _ => (None, occurrence.key.as_str()),
+            };
+            let prefix = key
+                .split(separator)
+                .take(segment_index + 1)
+                .collect::<Vec<_>>()
+                .join(separator);
+            match scope {
+                Some(scope) => CanonicalKey::join(scope, &prefix, separator),
+                None => CanonicalKey::new(prefix, separator),
+            }
+        })
         .or_else(|| snapshot.dictionary_at(uri, offset).map(|e| e.key.clone()))
 }
 
@@ -411,6 +463,94 @@ fn apply_changes(mut text: String, changes: &[TextDocumentContentChangeEvent]) -
     text
 }
 
+#[cfg(windows)]
+fn same_path(left: &std::path::Path, right: &std::path::Path) -> bool {
+    left.to_string_lossy()
+        .eq_ignore_ascii_case(&right.to_string_lossy())
+}
+
+#[cfg(not(windows))]
+fn same_path(left: &std::path::Path, right: &std::path::Path) -> bool {
+    left == right
+}
+
+fn path_is_within(path: &std::path::Path, root: &std::path::Path) -> bool {
+    let mut path_components = path.components();
+    root.components().all(|root_component| {
+        path_components.next().is_some_and(|path_component| {
+            #[cfg(windows)]
+            {
+                path_component
+                    .as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&root_component.as_os_str().to_string_lossy())
+            }
+            #[cfg(not(windows))]
+            {
+                path_component == root_component
+            }
+        })
+    })
+}
+
+fn diagnostic_notifications(workspace: &WorkspaceIndex) -> Vec<Notification> {
+    let snapshot = workspace.snapshot();
+    let mut by_uri: HashMap<Url, Vec<Diagnostic>> = HashMap::new();
+    for entry in snapshot.default_locale_leaf_entries(&workspace.config().default_locale) {
+        let diagnostics = by_uri.entry(entry.uri.clone()).or_default();
+        if workspace.config().unused_keys
+            && !snapshot.is_leaf_key_used(&entry.key)
+            && let Some(range) = location(&snapshot, &entry.uri, &entry.key_range).map(|l| l.range)
+        {
+            diagnostics.push(Diagnostic {
+                range,
+                severity: Some(DiagnosticSeverity::HINT),
+                code: None,
+                code_description: None,
+                source: Some("locale-breeze".into()),
+                message: "Translation key is unused".into(),
+                related_information: None,
+                tags: Some(vec![DiagnosticTag::UNNECESSARY]),
+                data: None,
+            });
+        }
+    }
+    let mut diagnostics = by_uri.into_iter().collect::<Vec<_>>();
+    diagnostics.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
+    diagnostics
+        .into_iter()
+        .map(|(uri, diagnostics)| {
+            Notification::new(
+                "textDocument/publishDiagnostics".into(),
+                PublishDiagnosticsParams::new(uri, diagnostics, None),
+            )
+        })
+        .collect()
+}
+
+fn publish_diagnostics(connection: &Connection, workspace: &WorkspaceIndex) {
+    for notification in diagnostic_notifications(workspace) {
+        let _ = connection.sender.send(Message::Notification(notification));
+    }
+}
+
+fn clear_diagnostics(connection: &Connection, workspace: &WorkspaceIndex) {
+    let snapshot = workspace.snapshot();
+    let mut uris = snapshot
+        .default_locale_leaf_entries(&workspace.config().default_locale)
+        .map(|entry| entry.uri.clone())
+        .collect::<Vec<_>>();
+    uris.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    uris.dedup();
+    for uri in uris {
+        let notification = Notification::new(
+            "textDocument/publishDiagnostics".into(),
+            PublishDiagnosticsParams::new(uri, Vec::new(), None),
+        );
+        let _ = connection.sender.send(Message::Notification(notification));
+    }
+}
+
 fn log(connection: &Connection, typ: MessageType, message: String) {
     let params = LogMessageParams { typ, message };
     let notification = Notification::new("window/logMessage".into(), params);
@@ -420,6 +560,18 @@ fn log(connection: &Connection, typ: MessageType, message: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn workspace_path_matching_ignores_windows_casing() {
+        let root = std::path::Path::new(r"C:\Users\Example\Project");
+        let file = std::path::Path::new(r"c:\users\example\project\src\app.ts");
+        assert!(same_path(
+            root,
+            std::path::Path::new(r"c:\users\example\project")
+        ));
+        assert!(path_is_within(file, root));
+    }
+
     #[test]
     fn applies_utf16_incremental_edits() {
         let text = "const x = '😀';".to_owned();

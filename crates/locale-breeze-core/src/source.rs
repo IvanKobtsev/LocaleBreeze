@@ -29,6 +29,7 @@ pub struct ScopeBinding {
     pub direct_function: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn analyze_source(
     uri: &Url,
     text: &str,
@@ -36,6 +37,8 @@ pub fn analyze_source(
     scoped_functions: &[String],
     methods: &[String],
     full_key_functions: &[String],
+    translation_key_types: &[String],
+    translation_key_props: &[String],
 ) -> (Vec<SourceOccurrence>, Vec<ScopeBinding>) {
     let mut parser = Parser::new();
     if parser
@@ -67,6 +70,15 @@ pub fn analyze_source(
         scoped_functions,
         full_key_functions,
         &bindings,
+        &mut occurrences,
+    );
+    collect_lexical_key_sinks(
+        root,
+        uri,
+        text,
+        separator,
+        translation_key_types,
+        translation_key_props,
         &mut occurrences,
     );
     (occurrences, bindings)
@@ -234,6 +246,114 @@ fn resolve_binding<'a>(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn collect_lexical_key_sinks(
+    node: Node<'_>,
+    uri: &Url,
+    text: &str,
+    separator: &str,
+    configured_types: &[String],
+    configured_props: &[String],
+    out: &mut Vec<SourceOccurrence>,
+) {
+    let literal = match node.kind() {
+        "variable_declarator" => node
+            .child_by_field_name("type")
+            .filter(|ty| contains_configured_type(*ty, text, configured_types))
+            .and_then(|_| node.child_by_field_name("value"))
+            .and_then(string_literal_in),
+        "as_expression" | "satisfies_expression" | "type_assertion" => node
+            .child_by_field_name("type")
+            .or_else(|| node.named_child(node.named_child_count().saturating_sub(1)))
+            .filter(|ty| contains_configured_type(*ty, text, configured_types))
+            .and_then(|_| {
+                node.child_by_field_name("expression")
+                    .or_else(|| node.named_child(0))
+            })
+            .and_then(string_literal_in),
+        "jsx_attribute" => node
+            .child_by_field_name("name")
+            .or_else(|| node.named_child(0))
+            .and_then(|name| name.utf8_text(text.as_bytes()).ok())
+            .filter(|name| configured_props.iter().any(|prop| prop == name))
+            .and_then(|_| {
+                node.child_by_field_name("value")
+                    .or_else(|| node.named_child(1))
+            })
+            .and_then(string_literal_in),
+        "pair" => node
+            .child_by_field_name("key")
+            .and_then(|key| property_name(key, text))
+            .filter(|name| configured_props.iter().any(|prop| prop == name))
+            .and_then(|_| node.child_by_field_name("value"))
+            .and_then(string_literal_in),
+        _ => None,
+    };
+
+    if let Some(literal) = literal
+        && let Some(value) = literal_value(literal, text)
+        && let Some(key) = CanonicalKey::new(value, separator)
+    {
+        out.push(SourceOccurrence {
+            uri: uri.clone(),
+            range: content_range(literal),
+            key,
+            kind: OccurrenceKind::FullKey,
+            scope: None,
+            relative_key: None,
+        });
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_lexical_key_sinks(
+            child,
+            uri,
+            text,
+            separator,
+            configured_types,
+            configured_props,
+            out,
+        );
+    }
+}
+
+fn contains_configured_type(node: Node<'_>, text: &str, configured: &[String]) -> bool {
+    if matches!(
+        node.kind(),
+        "type_identifier" | "nested_type_identifier" | "identifier"
+    ) && node.utf8_text(text.as_bytes()).ok().is_some_and(|name| {
+        configured
+            .iter()
+            .any(|configured| configured == name || name.ends_with(&format!(".{configured}")))
+    }) {
+        return true;
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .any(|child| contains_configured_type(child, text, configured))
+}
+
+fn string_literal_in(node: Node<'_>) -> Option<Node<'_>> {
+    if node.kind() == "string" {
+        return Some(node);
+    }
+    if matches!(node.kind(), "jsx_expression" | "parenthesized_expression") {
+        let mut cursor = node.walk();
+        return node.named_children(&mut cursor).find_map(string_literal_in);
+    }
+    None
+}
+
+fn property_name<'a>(node: Node<'a>, text: &'a str) -> Option<&'a str> {
+    let raw = node.utf8_text(text.as_bytes()).ok()?;
+    if node.kind() == "string" {
+        raw.get(1..raw.len().saturating_sub(1))
+    } else {
+        Some(raw)
+    }
+}
+
 fn call_with_literal<'a>(node: Node<'a>, text: &str) -> Option<(String, Node<'a>)> {
     if node.kind() != "call_expression" {
         return None;
@@ -288,6 +408,7 @@ mod tests {
         let text = r#"
           const i18n = useScopedTranslation('Page.Login');
           i18n.t('submit');
+          i18n.key('page_title');
           const { t: tr } = useScopedTranslation("Page.Home");
           tr('title');
           i18next.t('Page.Login.cancel');
@@ -298,10 +419,12 @@ mod tests {
             text,
             ".",
             &["useScopedTranslation".into()],
-            &["t".into()],
+            &["t".into(), "key".into()],
             &["i18next.t".into()],
+            &[],
+            &[],
         );
-        assert_eq!(bindings.len(), 2);
+        assert_eq!(bindings.len(), 3);
         let keys: Vec<_> = found
             .iter()
             .filter(|o| o.kind != OccurrenceKind::ScopeDeclaration)
@@ -309,7 +432,12 @@ mod tests {
             .collect();
         assert_eq!(
             keys,
-            ["Page.Login.submit", "Page.Home.title", "Page.Login.cancel"]
+            [
+                "Page.Login.submit",
+                "Page.Login.page_title",
+                "Page.Home.title",
+                "Page.Login.cancel"
+            ]
         );
     }
 
@@ -323,7 +451,47 @@ mod tests {
             &["useScopedTranslation".into()],
             &["t".into()],
             &["i18next.t".into()],
+            &[],
+            &[],
         );
         assert!(found.is_empty());
+    }
+
+    #[test]
+    fn recognizes_configured_lexical_key_sinks() {
+        let text = r#"
+          const typed: TranslationKey = 'Page.Typed';
+          const asserted = 'Page.Asserted' as TranslationKey;
+          const satisfied = 'Page.Satisfied' satisfies TranslationKey;
+          const ignored: string = 'Page.Ignored';
+          const jsx = <><Card transKey="Page.Jsx"/><Card transKey={'Page.Expression'}/></>;
+          const object = { transKey: 'Page.Object', other: 'Page.Other' };
+        "#;
+        let uri = Url::parse("file:///app.tsx").unwrap();
+        let (found, _) = analyze_source(
+            &uri,
+            text,
+            ".",
+            &["useScopedTranslation".into()],
+            &["t".into()],
+            &["i18next.t".into()],
+            &["TranslationKey".into()],
+            &["transKey".into()],
+        );
+        let keys = found
+            .iter()
+            .map(|occurrence| occurrence.key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            [
+                "Page.Typed",
+                "Page.Asserted",
+                "Page.Satisfied",
+                "Page.Jsx",
+                "Page.Expression",
+                "Page.Object"
+            ]
+        );
     }
 }

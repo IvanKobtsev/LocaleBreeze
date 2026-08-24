@@ -15,6 +15,12 @@ pub struct Config {
     pub scoped_functions: Vec<String>,
     pub translation_methods: Vec<String>,
     pub full_key_functions: Vec<String>,
+    #[serde(default)]
+    pub translation_key_types: Vec<String>,
+    #[serde(default)]
+    pub translation_key_props: Vec<String>,
+    #[serde(default)]
+    pub unused_keys: bool,
 }
 
 fn default_separator() -> String {
@@ -64,6 +70,17 @@ impl Config {
                 || values
                     .iter()
                     .any(|v| v.is_empty() || v.split('.').any(str::is_empty))
+            {
+                return Err(ConfigError::Empty(name));
+            }
+        }
+        for (name, values) in [
+            ("translationKeyTypes", &self.translation_key_types),
+            ("translationKeyProps", &self.translation_key_props),
+        ] {
+            if values
+                .iter()
+                .any(|value| value.is_empty() || value.split('.').any(str::is_empty))
             {
                 return Err(ConfigError::Empty(name));
             }

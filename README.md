@@ -7,6 +7,7 @@ LocaleBreeze is a cross-editor language server for context-aware i18n navigation
 - Completion by full key, relative key, key fragment, or translated value from any locale.
 - Go to Definition from full keys, scoped keys, and scope declarations to JSON dictionaries.
 - Find References from dictionary properties back to full and scoped calls.
+- Optional unused-key hints on unreferenced default-locale dictionary leaves.
 - Incremental synchronization for TypeScript, TSX, JavaScript, JSX, and translation JSON.
 - Thin VS Code integration; no project source or translations leave the machine.
 
@@ -27,6 +28,10 @@ Only literal scopes and keys are resolved. Bindings are followed inside their le
 ## Configuration
 
 Copy `locale-breeze.example.json` to `locale-breeze.json` at the workspace root and adjust the dictionary pattern. The pattern must contain exactly one `{locale}` token, and the configured default locale must have a matching file.
+
+Set `"unusedKeys": true` to fade unreferenced leaf keys in the default-locale dictionary and list them as hints in VS Code's Problems panel. Since LocaleBreeze intentionally analyzes only supported literal translation flows, dynamic or otherwise unsupported references are not counted as uses.
+
+Set `"translationKeyTypes": ["TranslationKey"]` to recognize string literals with an explicit matching type annotation, `as` assertion, or `satisfies` clause. Set `"translationKeyProps": ["transKey"]` to recognize literal values of matching JSX attributes and object properties. These checks are lexical and do not start a TypeScript type checker.
 
 The checked-in schema is [`schemas/config-v1.schema.json`](schemas/config-v1.schema.json). The public raw-GitHub URL in the example becomes usable when this repository is published; it replaces the unprovisioned `localebreeze.dev` URL from the design draft.
 
@@ -52,7 +57,7 @@ For VS Code development, install the dependencies in `editors/vscode`, run its c
 
 - One dictionary pattern and logical translation module per workspace.
 - String-valued JSON leaves only; arrays and non-string leaves are ignored.
-- No diagnostics, rename, hover, CodeLens, namespaces, or cross-file data-flow yet.
+- No missing-key diagnostics, rename, hover, CodeLens, namespaces, or cross-file data-flow yet.
 - The JetBrains launcher is planned after the server protocol is stabilized.
 
 ## Development

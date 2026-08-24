@@ -34,6 +34,10 @@ pub struct IndexSnapshot {
 
 impl IndexSnapshot {
     fn rebuild(generation: u64, files: HashMap<Url, Arc<FileContribution>>) -> Self {
+        let files = files
+            .into_values()
+            .map(|file| (normalized_uri(&file.uri), file))
+            .collect::<HashMap<_, _>>();
         let mut dictionaries: BTreeMap<CanonicalKey, Vec<DictionaryEntry>> = BTreeMap::new();
         let mut occurrences: BTreeMap<CanonicalKey, Vec<SourceOccurrence>> = BTreeMap::new();
         for file in files.values() {
@@ -79,17 +83,31 @@ impl IndexSnapshot {
             .unwrap_or_default()
     }
 
+    pub fn default_locale_leaf_entries<'a>(
+        &'a self,
+        default_locale: &'a str,
+    ) -> impl Iterator<Item = &'a DictionaryEntry> + 'a {
+        self.dictionaries
+            .values()
+            .flatten()
+            .filter(move |entry| entry.locale == default_locale && entry.kind == EntryKind::Leaf)
+    }
+
+    pub fn is_leaf_key_used(&self, key: &CanonicalKey) -> bool {
+        self.occurrences(key)
+            .iter()
+            .any(|occurrence| occurrence.kind != OccurrenceKind::ScopeDeclaration)
+    }
+
     pub fn occurrence_at(&self, uri: &Url, offset: usize) -> Option<&SourceOccurrence> {
-        self.files
-            .get(uri)?
+        self.file(uri)?
             .occurrences
             .iter()
             .find(|o| o.range.contains(offset))
     }
 
     pub fn dictionary_at(&self, uri: &Url, offset: usize) -> Option<&DictionaryEntry> {
-        self.files
-            .get(uri)?
+        self.file(uri)?
             .dictionaries
             .iter()
             .filter(|e| e.key_range.contains(offset))
@@ -97,7 +115,11 @@ impl IndexSnapshot {
     }
 
     pub fn text(&self, uri: &Url) -> Option<&str> {
-        Some(&self.files.get(uri)?.text)
+        Some(&self.file(uri)?.text)
+    }
+
+    fn file(&self, uri: &Url) -> Option<&FileContribution> {
+        self.files.get(&normalized_uri(uri)).map(AsRef::as_ref)
     }
 
     pub fn completion_context_at(
@@ -106,7 +128,7 @@ impl IndexSnapshot {
         offset: usize,
         config: &Config,
     ) -> Option<CompletionContext> {
-        let file = self.files.get(uri)?;
+        let file = self.file(uri)?;
         let before = file.text.get(..offset)?;
         let quote_at = before.rfind(['\'', '"'])?;
         let query = before.get(quote_at + 1..)?.to_owned();
@@ -222,17 +244,34 @@ impl IndexSnapshot {
         (candidates, incomplete)
     }
 
-    pub fn immediate_child_occurrences(
+    pub fn scope_occurrences(
         &self,
         scope: &CanonicalKey,
         separator: &str,
+        recursive_leaf_limit: usize,
     ) -> Vec<&SourceOccurrence> {
+        let descendant_prefix = format!("{}{}", scope, separator);
+        let descendant_leaf_count = self
+            .dictionaries
+            .range(scope.clone()..)
+            .filter(|(key, entries)| {
+                key.as_str().starts_with(&descendant_prefix)
+                    && entries.iter().any(|entry| entry.kind == EntryKind::Leaf)
+            })
+            .take(recursive_leaf_limit + 1)
+            .count();
+        let recursive = descendant_leaf_count <= recursive_leaf_limit;
+
         self.occurrences
             .values()
             .flatten()
             .filter(|o| {
                 o.kind == OccurrenceKind::ScopeDeclaration && &o.key == scope
-                    || o.key.parent(separator).as_ref() == Some(scope)
+                    || if recursive {
+                        o.key.as_str().starts_with(&descendant_prefix)
+                    } else {
+                        o.key.parent(separator).as_ref() == Some(scope)
+                    }
             })
             .collect()
     }
@@ -325,7 +364,8 @@ impl WorkspaceIndex {
     }
 
     pub fn update_text(&self, uri: Url, text: String, version: Option<i32>) {
-        if let Some(current) = self.snapshot.load().files.get(&uri)
+        let file_key = normalized_uri(&uri);
+        if let Some(current) = self.snapshot.load().files.get(&file_key)
             && current
                 .version
                 .zip(version)
@@ -337,9 +377,9 @@ impl WorkspaceIndex {
         let current = self.snapshot.load_full();
         let mut files = current.files.clone();
         if let Some(contribution) = contribution {
-            files.insert(uri, Arc::new(contribution));
+            files.insert(file_key.clone(), Arc::new(contribution));
         } else {
-            files.remove(&uri);
+            files.remove(&file_key);
         }
         self.snapshot.store(Arc::new(IndexSnapshot::rebuild(
             current.generation + 1,
@@ -349,13 +389,14 @@ impl WorkspaceIndex {
 
     pub fn close_document(&self, uri: &Url) {
         if let Ok(path) = uri.to_file_path() {
+            let file_key = normalized_uri(uri);
             let pattern = self.config.dictionary_pattern().expect("validated pattern");
             let current = self.snapshot.load_full();
             let mut files = current.files.clone();
             if let Some(contribution) = self.parse_disk_file(&path, &pattern) {
-                files.insert(uri.clone(), Arc::new(contribution));
+                files.insert(file_key.clone(), Arc::new(contribution));
             } else {
-                files.remove(uri);
+                files.remove(&file_key);
             }
             self.snapshot.store(Arc::new(IndexSnapshot::rebuild(
                 current.generation + 1,
@@ -368,10 +409,11 @@ impl WorkspaceIndex {
         let Ok(uri) = Url::from_file_path(path) else {
             return;
         };
+        let file_key = normalized_uri(&uri);
         let current = self.snapshot.load_full();
         if current
             .files
-            .get(&uri)
+            .get(&file_key)
             .is_some_and(|file| file.version.is_some())
         {
             return;
@@ -379,9 +421,9 @@ impl WorkspaceIndex {
         let pattern = self.config.dictionary_pattern().expect("validated pattern");
         let mut files = current.files.clone();
         if let Some(contribution) = self.parse_disk_file(path, &pattern) {
-            files.insert(uri, Arc::new(contribution));
+            files.insert(file_key.clone(), Arc::new(contribution));
         } else {
-            files.remove(&uri);
+            files.remove(&file_key);
         }
         self.snapshot.store(Arc::new(IndexSnapshot::rebuild(
             current.generation + 1,
@@ -436,6 +478,8 @@ impl WorkspaceIndex {
                 &self.config.scoped_functions,
                 &self.config.translation_methods,
                 &self.config.full_key_functions,
+                &self.config.translation_key_types,
+                &self.config.translation_key_props,
             );
             Some(FileContribution {
                 uri,
@@ -451,6 +495,18 @@ impl WorkspaceIndex {
     }
 }
 
+fn normalized_uri(uri: &Url) -> Url {
+    #[cfg(windows)]
+    {
+        if uri.scheme() == "file" {
+            let mut normalized = uri.clone();
+            normalized.set_path(&uri.path().to_lowercase());
+            return normalized;
+        }
+    }
+    uri.clone()
+}
+
 fn is_source(path: &Path) -> bool {
     path.extension()
         .and_then(|x| x.to_str())
@@ -460,6 +516,24 @@ fn is_source(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn file_lookup_ignores_windows_uri_casing() {
+        let indexed_uri = Url::parse("file:///C:/Project/App.ts").unwrap();
+        let requested_uri = Url::parse("file:///c:/project/app.ts").unwrap();
+        let contribution = FileContribution {
+            uri: indexed_uri.clone(),
+            text: "const value = 1;".into(),
+            version: None,
+            dictionaries: vec![],
+            occurrences: vec![],
+            bindings: vec![],
+        };
+        let snapshot =
+            IndexSnapshot::rebuild(1, HashMap::from([(indexed_uri, Arc::new(contribution))]));
+        assert_eq!(snapshot.text(&requested_uri), Some("const value = 1;"));
+    }
+
     #[test]
     fn searches_values_and_relative_keys() {
         let uri = Url::parse("file:///translation.en.json").unwrap();
@@ -490,6 +564,119 @@ mod tests {
     }
 
     #[test]
+    fn reports_only_unreferenced_default_locale_leaves_as_unused() {
+        let dictionary_uri = Url::parse("file:///translation.en.json").unwrap();
+        let dictionary_text = r#"{"used":"Used","unused":"Unused"}"#.to_string();
+        let dictionaries = parse_dictionary(&dictionary_uri, "en", &dictionary_text, ".").unwrap();
+        let dictionary = FileContribution {
+            uri: dictionary_uri.clone(),
+            text: dictionary_text,
+            version: None,
+            dictionaries,
+            occurrences: vec![],
+            bindings: vec![],
+        };
+
+        let source_uri = Url::parse("file:///app.ts").unwrap();
+        let source_text = "i18next.t('used')".to_string();
+        let (occurrences, bindings) = analyze_source(
+            &source_uri,
+            &source_text,
+            ".",
+            &["useScopedTranslation".into()],
+            &["t".into()],
+            &["i18next.t".into()],
+            &[],
+            &[],
+        );
+        let source = FileContribution {
+            uri: source_uri.clone(),
+            text: source_text,
+            version: None,
+            dictionaries: vec![],
+            occurrences,
+            bindings,
+        };
+        let snapshot = IndexSnapshot::rebuild(
+            1,
+            HashMap::from([
+                (dictionary_uri, Arc::new(dictionary)),
+                (source_uri, Arc::new(source)),
+            ]),
+        );
+
+        let leaves = snapshot
+            .default_locale_leaf_entries("en")
+            .map(|entry| (entry.key.as_str(), snapshot.is_leaf_key_used(&entry.key)))
+            .collect::<Vec<_>>();
+        assert_eq!(leaves, vec![("unused", false), ("used", true)]);
+    }
+
+    #[test]
+    fn scope_references_are_recursive_only_for_small_scopes() {
+        fn snapshot_with_leaf_count(count: usize) -> IndexSnapshot {
+            let dictionary_uri = Url::parse("file:///translation.en.json").unwrap();
+            let children = (0..count)
+                .map(|index| format!(r#""Child{index}":{{"leaf":"value"}}"#))
+                .collect::<Vec<_>>()
+                .join(",");
+            let dictionary_text = format!(r#"{{"Scope":{{{children}}}}}"#);
+            let dictionaries =
+                parse_dictionary(&dictionary_uri, "en", &dictionary_text, ".").unwrap();
+            let dictionary = FileContribution {
+                uri: dictionary_uri.clone(),
+                text: dictionary_text,
+                version: None,
+                dictionaries,
+                occurrences: vec![],
+                bindings: vec![],
+            };
+
+            let source_uri = Url::parse("file:///app.ts").unwrap();
+            let source_text = concat!(
+                "i18next.t('Scope.Child0.leaf');",
+                "useScopedTranslation('Scope.Child0')"
+            )
+            .to_string();
+            let (occurrences, bindings) = analyze_source(
+                &source_uri,
+                &source_text,
+                ".",
+                &["useScopedTranslation".into()],
+                &["t".into()],
+                &["i18next.t".into()],
+                &[],
+                &[],
+            );
+            let source = FileContribution {
+                uri: source_uri.clone(),
+                text: source_text,
+                version: None,
+                dictionaries: vec![],
+                occurrences,
+                bindings,
+            };
+            IndexSnapshot::rebuild(
+                1,
+                HashMap::from([
+                    (dictionary_uri, Arc::new(dictionary)),
+                    (source_uri, Arc::new(source)),
+                ]),
+            )
+        }
+
+        let scope = CanonicalKey::new("Scope", ".").unwrap();
+        let small = snapshot_with_leaf_count(2);
+        assert_eq!(small.scope_occurrences(&scope, ".", 32).len(), 2);
+
+        let large = snapshot_with_leaf_count(33);
+        let occurrences = large.scope_occurrences(&scope, ".", 32);
+        assert_eq!(occurrences.len(), 1);
+        assert_eq!(occurrences[0].kind, OccurrenceKind::ScopeDeclaration);
+        assert_eq!(occurrences[0].key.as_str(), "Scope.Child0");
+    }
+
+    #[test]
     fn detects_completion_in_empty_literal() {
         let uri = Url::parse("file:///app.tsx").unwrap();
         let text = "const i18n=useScopedTranslation('Page.Login'); i18n.t('')".to_string();
@@ -500,6 +687,8 @@ mod tests {
             &["useScopedTranslation".into()],
             &["t".into()],
             &["i18next.t".into()],
+            &[],
+            &[],
         );
         let contribution = FileContribution {
             uri: uri.clone(),
