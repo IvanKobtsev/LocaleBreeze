@@ -28,3 +28,72 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run check
       - run: pnpm run compile
+
+  editor-binaries:
+    strategy:
+      matrix:
+        include:
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, ext: .exe }
+          - { os: windows-latest, target: aarch64-pc-windows-msvc, ext: .exe }
+          - { os: macos-13, target: x86_64-apple-darwin, ext: "" }
+          - { os: macos-14, target: aarch64-apple-darwin, ext: "" }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, ext: "" }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu, ext: "", cross: arm64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with: { targets: "${{ matrix.target }}" }
+      - if: matrix.cross == 'arm64'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+      - if: matrix.cross == 'arm64'
+        run: echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+      - run: cargo build --release -p locale-breeze --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: locale-breeze-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/locale-breeze${{ matrix.ext }}
+
+  package-editors:
+    needs: [rust, vscode, editor-binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: pnpm/action-setup@v4
+        with: { version: 11.19.0 }
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 25
+      - name: Install VS Code dependencies
+        working-directory: editors/vscode
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Stage native executables
+        run: |
+          mkdir -p npm/platforms/{win32-x64,win32-arm64,darwin-x64,darwin-arm64,linux-x64,linux-arm64}/bin
+          cp artifacts/locale-breeze-x86_64-pc-windows-msvc/locale-breeze.exe npm/platforms/win32-x64/bin/
+          cp artifacts/locale-breeze-aarch64-pc-windows-msvc/locale-breeze.exe npm/platforms/win32-arm64/bin/
+          cp artifacts/locale-breeze-x86_64-apple-darwin/locale-breeze npm/platforms/darwin-x64/bin/
+          cp artifacts/locale-breeze-aarch64-apple-darwin/locale-breeze npm/platforms/darwin-arm64/bin/
+          cp artifacts/locale-breeze-x86_64-unknown-linux-gnu/locale-breeze npm/platforms/linux-x64/bin/
+          cp artifacts/locale-breeze-aarch64-unknown-linux-gnu/locale-breeze npm/platforms/linux-arm64/bin/
+          chmod +x npm/platforms/{darwin-x64,darwin-arm64,linux-x64,linux-arm64}/bin/locale-breeze
+      - name: Package editor extensions
+        run: node scripts/package-editors.mjs
+      - name: Upload VS Code extensions
+        uses: actions/upload-artifact@v4
+        with:
+          name: locale-breeze-vscode-extensions
+          path: dist/editors/*.vsix
+          if-no-files-found: error
+      - name: Upload WebStorm extension
+        uses: actions/upload-artifact@v4
+        with:
+          name: locale-breeze-webstorm-extension
+          path: dist/editors/*.zip
+          if-no-files-found: error
