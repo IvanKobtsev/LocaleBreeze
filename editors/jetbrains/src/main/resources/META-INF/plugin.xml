@@ -23,4 +23,14 @@
         instance="dev.localebreeze.jetbrains.LocaleBreezeConfigurable"/>
     <notificationGroup id="LocaleBreeze" displayType="BALLOON"/>
   </extensions>
+
+  <actions>
+    <action
+        id="dev.localebreeze.jetbrains.CopyFullKey"
+        class="dev.localebreeze.jetbrains.LocaleBreezeCopyFullKeyAction"
+        text="Copy Full Translation Key"
+        description="Copy the full LocaleBreeze translation key path">
+      <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+    </action>
+  </actions>
 </idea-plugin>

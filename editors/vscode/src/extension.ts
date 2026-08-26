@@ -31,6 +31,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     outputChannelName: 'LocaleBreeze'
   };
   client = new LanguageClient('localeBreeze', 'LocaleBreeze', serverOptions, clientOptions);
+  context.subscriptions.push(vscode.commands.registerCommand('localeBreeze.copyFullKey', copyFullKey));
   const trace = settings.get<string>('server.trace', 'off');
   client.setTrace(trace === 'verbose' ? Trace.Verbose : trace === 'messages' ? Trace.Messages : Trace.Off);
   await client.start();
@@ -50,4 +51,23 @@ function resolveConfig(value: string): string | undefined {
   if (path.isAbsolute(value)) return value;
   const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   return root ? path.join(root, value) : value;
+}
+
+async function copyFullKey(): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.document.languageId !== 'json' || !client) return;
+
+  const key = await client.sendRequest<string | null>('workspace/executeCommand', {
+    command: 'localeBreeze.copyFullKey',
+    arguments: [{
+      textDocument: { uri: editor.document.uri.toString() },
+      position: editor.selection.active
+    }]
+  });
+  if (!key) {
+    void vscode.window.showInformationMessage('LocaleBreeze: Place the cursor on a translation key.');
+    return;
+  }
+  await vscode.env.clipboard.writeText(key);
+  void vscode.window.setStatusBarMessage(`LocaleBreeze: Copied ${key}`, 3000);
 }

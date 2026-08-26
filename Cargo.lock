@@ -429,6 +429,7 @@ dependencies = [
  "notify",
  "serde",
  "serde_json",
+ "tempfile",
  "tracing",
  "url",
 ]

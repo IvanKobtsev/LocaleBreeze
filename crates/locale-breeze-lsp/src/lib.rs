@@ -12,6 +12,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use url::Url;
 
+const COPY_KEY_COMMAND: &str = "localeBreeze.copyFullKey";
+
 pub fn run_stdio(config_override: Option<PathBuf>) -> Result<()> {
     let (connection, io_threads) = Connection::stdio();
     let capabilities = ServerCapabilities {
@@ -24,6 +26,10 @@ pub fn run_stdio(config_override: Option<PathBuf>) -> Result<()> {
         }),
         definition_provider: Some(OneOf::Left(true)),
         references_provider: Some(OneOf::Left(true)),
+        execute_command_provider: Some(ExecuteCommandOptions {
+            commands: vec![COPY_KEY_COMMAND.into()],
+            ..Default::default()
+        }),
         workspace: Some(WorkspaceServerCapabilities {
             workspace_folders: Some(WorkspaceFoldersServerCapabilities {
                 supported: Some(true),
@@ -183,6 +189,8 @@ impl Server {
                 .and_then(|p| serialize_optional(self.definition(p)?)),
             "textDocument/references" => parse::<ReferenceParams>(request.params)
                 .and_then(|p| serialize_optional(self.references(p)?)),
+            "workspace/executeCommand" => parse::<ExecuteCommandParams>(request.params)
+                .and_then(|p| serialize_optional(self.execute_command(p)?)),
             _ => {
                 return Response::new_err(
                     id,
@@ -382,6 +390,28 @@ impl Server {
             );
         }
         Ok(Some(locations))
+    }
+
+    fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<String>> {
+        if params.command != COPY_KEY_COMMAND {
+            return Ok(None);
+        }
+        let Some(argument) = params.arguments.first() else {
+            return Ok(None);
+        };
+        let position: TextDocumentPositionParams = serde_json::from_value(argument.clone())?;
+        let uri = position.text_document.uri;
+        let Some(workspace) = self.workspace_for_uri(&uri) else {
+            return Ok(None);
+        };
+        let snapshot = workspace.snapshot();
+        Ok(key_at_position(
+            &snapshot,
+            &uri,
+            position.position,
+            &workspace.config().key_separator,
+        )
+        .map(|key| key.as_str().to_owned()))
     }
 }
 
@@ -584,5 +614,53 @@ mod tests {
             }],
         );
         assert_eq!(changed, "const x = 'ok';");
+    }
+
+    #[test]
+    fn copy_key_command_returns_the_configured_full_dictionary_path() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("locale-breeze.json"),
+            r#"{
+              "dictionaries":"translation.{locale}.json",
+              "defaultLocale":"en",
+              "keySeparator":"/",
+              "scopedFunctions":["useScopedTranslation"],
+              "translationMethods":["t"],
+              "fullKeyFunctions":["i18next.t"]
+            }"#,
+        )
+        .unwrap();
+        let dictionary_path = temp.path().join("translation.en.json");
+        std::fs::write(
+            &dictionary_path,
+            r#"{"Page":{"Login":{"submit":"Sign in"}}}"#,
+        )
+        .unwrap();
+        let workspace = WorkspaceIndex::load(
+            temp.path().to_owned(),
+            &temp.path().join("locale-breeze.json"),
+        )
+        .unwrap();
+        let uri = Url::from_file_path(dictionary_path).unwrap();
+        let server = Server {
+            workspaces: vec![Arc::new(workspace)],
+            watchers: vec![],
+            config_override: None,
+        };
+        let result = server
+            .execute_command(ExecuteCommandParams {
+                command: COPY_KEY_COMMAND.into(),
+                arguments: vec![
+                    serde_json::to_value(TextDocumentPositionParams::new(
+                        TextDocumentIdentifier::new(uri),
+                        Position::new(0, 20),
+                    ))
+                    .unwrap(),
+                ],
+                work_done_progress_params: Default::default(),
+            })
+            .unwrap();
+        assert_eq!(result.as_deref(), Some("Page/Login/submit"));
     }
 }

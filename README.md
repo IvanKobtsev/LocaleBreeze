@@ -17,6 +17,7 @@ Both extensions run the analysis locally: no project source or translations leav
 - Optional unused-key hints on unreferenced default-locale dictionary leaves.
 - Incremental synchronization for TypeScript, TSX, JavaScript, JSX, and translation JSON.
 - The same fast, Rust-powered language intelligence in VS Code and JetBrains IDEs.
+- Copy a full translation key path directly from its JSON dictionary entry.
 
 ## MVP limitations
 

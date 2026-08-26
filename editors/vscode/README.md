@@ -9,6 +9,7 @@ LocaleBreeze provides context-aware completion and navigation for JSON translati
 - Find source usages from translation declarations.
 - Optionally fade and report unused default-locale keys.
 - Recognize configured translation-key types and component properties lexically.
+- Copy the full translation key from a JSON dictionary via the editor context menu.
 
 ## Setup
 

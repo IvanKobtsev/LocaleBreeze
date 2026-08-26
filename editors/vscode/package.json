@@ -14,10 +14,26 @@
   "categories": ["Programming Languages", "Other"],
   "activationEvents": [
     "onLanguage:typescript", "onLanguage:typescriptreact", "onLanguage:javascript",
-    "onLanguage:javascriptreact", "onLanguage:json"
+    "onLanguage:javascriptreact", "onLanguage:json", "onCommand:localeBreeze.copyFullKey"
   ],
   "main": "./dist/extension.js",
   "contributes": {
+    "commands": [
+      {
+        "command": "localeBreeze.copyFullKey",
+        "title": "LocaleBreeze: Copy Full Translation Key",
+        "icon": "$(copy)"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "localeBreeze.copyFullKey",
+          "when": "editorLangId == json",
+          "group": "navigation@10"
+        }
+      ]
+    },
     "configuration": {
       "title": "LocaleBreeze",
       "properties": {
