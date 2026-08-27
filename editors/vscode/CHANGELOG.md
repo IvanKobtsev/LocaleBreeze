@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.3
+
+- Fixed an activation failure caused by the copy-path UI command colliding with the language server's internal command.
+
 ## 0.1.2
 
 - Added copying full translation-key paths from JSON dictionaries.

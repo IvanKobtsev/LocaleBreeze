@@ -58,7 +58,7 @@ async function copyFullKey(): Promise<void> {
   if (!editor || editor.document.languageId !== 'json' || !client) return;
 
   const key = await client.sendRequest<string | null>('workspace/executeCommand', {
-    command: 'localeBreeze.copyFullKey',
+    command: 'localeBreeze.resolveFullKey',
     arguments: [{
       textDocument: { uri: editor.document.uri.toString() },
       position: editor.selection.active

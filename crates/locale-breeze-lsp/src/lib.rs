@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use url::Url;
 
-const COPY_KEY_COMMAND: &str = "localeBreeze.copyFullKey";
+const RESOLVE_KEY_COMMAND: &str = "localeBreeze.resolveFullKey";
 
 pub fn run_stdio(config_override: Option<PathBuf>) -> Result<()> {
     let (connection, io_threads) = Connection::stdio();
@@ -27,7 +27,7 @@ pub fn run_stdio(config_override: Option<PathBuf>) -> Result<()> {
         definition_provider: Some(OneOf::Left(true)),
         references_provider: Some(OneOf::Left(true)),
         execute_command_provider: Some(ExecuteCommandOptions {
-            commands: vec![COPY_KEY_COMMAND.into()],
+            commands: vec![RESOLVE_KEY_COMMAND.into()],
             ..Default::default()
         }),
         workspace: Some(WorkspaceServerCapabilities {
@@ -393,7 +393,7 @@ impl Server {
     }
 
     fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<String>> {
-        if params.command != COPY_KEY_COMMAND {
+        if params.command != RESOLVE_KEY_COMMAND {
             return Ok(None);
         }
         let Some(argument) = params.arguments.first() else {
@@ -650,7 +650,7 @@ mod tests {
         };
         let result = server
             .execute_command(ExecuteCommandParams {
-                command: COPY_KEY_COMMAND.into(),
+                command: RESOLVE_KEY_COMMAND.into(),
                 arguments: vec![
                     serde_json::to_value(TextDocumentPositionParams::new(
                         TextDocumentIdentifier::new(uri),

@@ -1,6 +1,6 @@
 {
   "name": "@locale-breeze/language-server",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Context-aware i18n language server for TS, JS, and JSON",
   "license": "MIT",
   "repository": {
@@ -15,12 +15,12 @@
   "files": ["cli.js", "index.js", "README.md"],
   "engines": { "node": ">=18" },
   "optionalDependencies": {
-    "@locale-breeze/language-server-win32-x64": "0.1.2",
-    "@locale-breeze/language-server-win32-arm64": "0.1.2",
-    "@locale-breeze/language-server-darwin-x64": "0.1.2",
-    "@locale-breeze/language-server-darwin-arm64": "0.1.2",
-    "@locale-breeze/language-server-linux-x64": "0.1.2",
-    "@locale-breeze/language-server-linux-arm64": "0.1.2"
+    "@locale-breeze/language-server-win32-x64": "0.1.3",
+    "@locale-breeze/language-server-win32-arm64": "0.1.3",
+    "@locale-breeze/language-server-darwin-x64": "0.1.3",
+    "@locale-breeze/language-server-darwin-arm64": "0.1.3",
+    "@locale-breeze/language-server-linux-x64": "0.1.3",
+    "@locale-breeze/language-server-linux-arm64": "0.1.3"
   },
   "publishConfig": { "access": "public" }
 }
