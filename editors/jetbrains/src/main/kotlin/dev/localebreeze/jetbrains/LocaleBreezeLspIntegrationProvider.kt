@@ -1,12 +1,10 @@
 package dev.localebreeze.jetbrains
 
 import com.intellij.execution.configurations.GeneralCommandLine
-import com.intellij.ide.plugins.PluginManagerCore
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.diagnostic.Logger
-import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.SystemInfoRt
 import com.intellij.openapi.vfs.VirtualFile
@@ -79,7 +77,6 @@ private object LocaleBreezeLspCustomization : LspCustomization() {
 
 private object LocaleBreezeExecutable {
     private val log = Logger.getInstance(LocaleBreezeExecutable::class.java)
-    private val pluginId = PluginId.getId("dev.localebreeze.jetbrains")
 
     fun resolve(project: Project): Path? {
         val configured = LocaleBreezeSettings.getInstance(project).state.serverPath
@@ -87,8 +84,8 @@ private object LocaleBreezeExecutable {
             val path = resolveProjectPath(project, configured)
             return path.takeIf(Files::isRegularFile)
         }
-        val pluginPath = PluginManagerCore.getPlugin(pluginId)?.pluginPath ?: return null
-        val executable = pluginPath.resolve("bin").resolve(platformDirectory()).resolve(executableName())
+        val pluginRoot = pluginRoot() ?: return null
+        val executable = pluginRoot.resolve("bin").resolve(platformDirectory()).resolve(executableName())
         if (!Files.isRegularFile(executable)) return null
         if (!SystemInfoRt.isWindows && !executable.toFile().setExecutable(true)) {
             log.warn("Could not mark LocaleBreeze executable as executable: $executable")
@@ -107,6 +104,18 @@ private object LocaleBreezeExecutable {
         if (path.isAbsolute) return path.normalize()
         val root = project.basePath?.let(Path::of) ?: Path.of(PathManager.getSystemPath())
         return root.resolve(path).normalize()
+    }
+
+    private fun pluginRoot(): Path? {
+        val location = runCatching {
+            Path.of(LocaleBreezeExecutable::class.java.protectionDomain.codeSource.location.toURI())
+        }.getOrNull() ?: return null
+        var candidate = if (Files.isRegularFile(location)) location.parent else location
+        repeat(4) {
+            if (Files.isDirectory(candidate.resolve("bin"))) return candidate
+            candidate = candidate.parent ?: return null
+        }
+        return null
     }
 
     private fun platformDirectory(): String {
