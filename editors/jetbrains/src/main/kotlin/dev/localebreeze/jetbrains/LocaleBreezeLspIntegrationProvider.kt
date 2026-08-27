@@ -84,9 +84,11 @@ private object LocaleBreezeExecutable {
             val path = resolveProjectPath(project, configured)
             return path.takeIf(Files::isRegularFile)
         }
-        val pluginRoot = pluginRoot() ?: return null
-        val executable = pluginRoot.resolve("bin").resolve(platformDirectory()).resolve(executableName())
-        if (!Files.isRegularFile(executable)) return null
+        val executable = bundledExecutable()
+        if (executable == null) {
+            log.warn("Could not locate the bundled LocaleBreeze executable")
+            return null
+        }
         if (!SystemInfoRt.isWindows && !executable.toFile().setExecutable(true)) {
             log.warn("Could not mark LocaleBreeze executable as executable: $executable")
         }
@@ -104,6 +106,19 @@ private object LocaleBreezeExecutable {
         if (path.isAbsolute) return path.normalize()
         val root = project.basePath?.let(Path::of) ?: Path.of(PathManager.getSystemPath())
         return root.resolve(path).normalize()
+    }
+
+    private fun bundledExecutable(): Path? {
+        val relative = Path.of("bin", platformDirectory(), executableName())
+        val roots = buildList {
+            pluginRoot()?.let(::add)
+            add(Path.of(PathManager.getPluginsPath()).resolve("locale-breeze-jetbrains"))
+        }
+        return roots
+            .asSequence()
+            .map { it.resolve(relative).normalize() }
+            .distinct()
+            .firstOrNull(Files::isRegularFile)
     }
 
     private fun pluginRoot(): Path? {
