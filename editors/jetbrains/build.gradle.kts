@@ -1,4 +1,5 @@
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
+import org.jetbrains.intellij.platform.gradle.tasks.PrepareSandboxTask
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
@@ -34,13 +35,40 @@ intellijPlatform {
     }
 }
 
+val nativeBinaries = layout.buildDirectory.dir("generated-native-binaries")
+
 val prepareNativeBinaries by tasks.registering(Copy::class) {
     from(rootProject.layout.projectDirectory.dir("../../dist/jetbrains"))
-    into(layout.buildDirectory.dir("generated-resources/bin"))
+    into(nativeBinaries)
 }
 
-sourceSets.main {
-    resources.srcDir(layout.buildDirectory.dir("generated-resources"))
+tasks.withType<PrepareSandboxTask>().configureEach {
+    dependsOn(prepareNativeBinaries)
+    from(nativeBinaries) {
+        into(pluginName.map { "$it/bin" })
+    }
 }
 
-tasks.processResources { dependsOn(prepareNativeBinaries) }
+val verifyBundledBinaries by tasks.registering {
+    dependsOn(tasks.named("buildPlugin"))
+    doLast {
+        val archive = tasks.named<Zip>("buildPlugin").get().archiveFile.get().asFile
+        val entries = mutableSetOf<String>()
+        zipTree(archive).visit {
+            if (!isDirectory) entries += relativePath.pathString.replace('\\', '/')
+        }
+        val expected = mapOf(
+            "win32-x64" to "locale-breeze.exe",
+            "win32-arm64" to "locale-breeze.exe",
+            "darwin-x64" to "locale-breeze",
+            "darwin-arm64" to "locale-breeze",
+            "linux-x64" to "locale-breeze",
+            "linux-arm64" to "locale-breeze",
+        )
+        for ((target, binary) in expected) {
+            check(entries.any { it.endsWith("/bin/$target/$binary") }) {
+                "Plugin archive is missing executable: bin/$target/$binary"
+            }
+        }
+    }
+}

@@ -66,7 +66,7 @@ function packageJetBrains() {
   }
   const wrapper = join(jetbrainsRoot, process.platform === 'win32' ? 'gradlew.bat' : 'gradlew');
   if (process.platform !== 'win32') chmodSync(wrapper, 0o755);
-  run(wrapper, ['buildPlugin', 'verifyPluginStructure', '--rerun-tasks'], jetbrainsRoot);
+  run(wrapper, ['buildPlugin', 'verifyPluginStructure', 'verifyBundledBinaries', '--rerun-tasks'], jetbrainsRoot);
   const version = readProperties(join(jetbrainsRoot, 'gradle.properties')).version;
   const built = join(jetbrainsRoot, 'build', 'distributions', `locale-breeze-jetbrains-${version}.zip`);
   requireNonEmpty(built);
