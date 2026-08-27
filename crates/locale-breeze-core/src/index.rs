@@ -373,13 +373,26 @@ impl WorkspaceIndex {
         {
             return;
         }
-        let contribution = self.parse_text(uri.clone(), text, version);
+        let contribution = self.parse_text(uri.clone(), text.clone(), version);
         let current = self.snapshot.load_full();
         let mut files = current.files.clone();
         if let Some(contribution) = contribution {
             files.insert(file_key.clone(), Arc::new(contribution));
         } else {
-            files.remove(&file_key);
+            // Keep the latest document text even when an intermediate edit is
+            // not parseable. LSP changes are incremental, so dropping the file
+            // here would leave no base text to which the next change can apply.
+            files.insert(
+                file_key.clone(),
+                Arc::new(FileContribution {
+                    uri,
+                    text,
+                    version,
+                    dictionaries: vec![],
+                    occurrences: vec![],
+                    bindings: vec![],
+                }),
+            );
         }
         self.snapshot.store(Arc::new(IndexSnapshot::rebuild(
             current.generation + 1,
@@ -747,5 +760,40 @@ mod tests {
         let uri = Url::from_file_path(source_path).unwrap();
         workspace.update_text(uri, "i18next.t('Page.Login.cancel')".into(), Some(1));
         assert!(workspace.snapshot().occurrences(&key).is_empty());
+    }
+
+    #[test]
+    fn recovers_after_an_invalid_intermediate_dictionary_edit() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("locale-breeze.json"),
+            r#"{
+              "dictionaries":"translation.{locale}.json",
+              "defaultLocale":"en",
+              "keySeparator":".",
+              "scopedFunctions":["useScopedTranslation"],
+              "translationMethods":["t"],
+              "fullKeyFunctions":["i18next.t"]
+            }"#,
+        )
+        .unwrap();
+        let dictionary_path = temp.path().join("translation.en.json");
+        std::fs::write(&dictionary_path, r#"{"Page":{"old":"Old"}}"#).unwrap();
+        let workspace = WorkspaceIndex::load(
+            temp.path().to_owned(),
+            &temp.path().join("locale-breeze.json"),
+        )
+        .unwrap();
+        let uri = Url::from_file_path(dictionary_path).unwrap();
+
+        workspace.update_text(uri.clone(), r#"{"Page":{"new":}}"#.into(), Some(1));
+        assert_eq!(
+            workspace.snapshot().text(&uri),
+            Some(r#"{"Page":{"new":}}"#)
+        );
+
+        workspace.update_text(uri, r#"{"Page":{"new":"New"}}"#.into(), Some(2));
+        let key = CanonicalKey::new("Page.new", ".").unwrap();
+        assert_eq!(workspace.snapshot().dictionary_entries(&key).len(), 1);
     }
 }
