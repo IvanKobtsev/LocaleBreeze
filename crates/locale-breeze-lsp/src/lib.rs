@@ -371,15 +371,43 @@ impl Server {
             return Ok(None);
         };
         let default_locale = &workspace.config().default_locale;
-        let text = snapshot
+        let default_entry = snapshot
             .dictionary_entries(&key)
             .iter()
-            .find(|entry| entry.locale == *default_locale && entry.kind == EntryKind::Leaf)
-            .and_then(|entry| entry.value.clone())
-            .unwrap_or_else(|| format!("Translation key '{}' does not exist.", key.as_str()));
+            .find(|entry| entry.locale == *default_locale);
+        let text = match default_entry {
+            Some(entry) if entry.kind == EntryKind::Leaf => entry.value.clone().unwrap_or_default(),
+            Some(entry) if entry.kind == EntryKind::Object => {
+                let mut children = snapshot
+                    .direct_dictionary_children(&key, &workspace.config().key_separator)
+                    .filter(|child| child.locale == *default_locale)
+                    .collect::<Vec<_>>();
+                children.dedup_by(|left, right| left.key == right.key);
+                let has_more = children.len() > 5;
+                let mut preview = children
+                    .into_iter()
+                    .take(5)
+                    .map(|child| {
+                        let relative = child
+                            .key
+                            .relative_to(&key, &workspace.config().key_separator)
+                            .unwrap_or(child.key.as_str());
+                        match child.value.as_deref() {
+                            Some(value) => format!("- `{relative}`: {value}"),
+                            None => format!("- `{relative}`"),
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if has_more {
+                    preview.push("...".into());
+                }
+                preview.join("\n")
+            }
+            _ => format!("Translation key `{}` does not exist.", key.as_str()),
+        };
         Ok(Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
-                kind: MarkupKind::PlainText,
+                kind: MarkupKind::Markdown,
                 value: text,
             }),
             range: None,
@@ -669,11 +697,18 @@ mod tests {
         .unwrap();
         std::fs::write(
             temp.path().join("translation.en.json"),
-            r#"{"known":"Default value"}"#,
+            r#"{
+              "known":"<strong>Default value</strong>",
+              "scope":{"a":"A","b":"B","c":"C","d":"D","e":"E","f":"F"}
+            }"#,
         )
         .unwrap();
         let source_path = temp.path().join("app.ts");
-        std::fs::write(&source_path, "i18next.t('known');\ni18next.t('missing');").unwrap();
+        std::fs::write(
+            &source_path,
+            "i18next.t('known');\ni18next.t('missing');\nuseScopedTranslation('scope');",
+        )
+        .unwrap();
         let workspace = WorkspaceIndex::load(
             temp.path().to_owned(),
             &temp.path().join("locale-breeze.json"),
@@ -685,12 +720,12 @@ mod tests {
             watchers: vec![],
             config_override: None,
         };
-        let hover_at = |line| {
+        let hover_at = |line, character| {
             server
                 .hover(HoverParams {
                     text_document_position_params: TextDocumentPositionParams::new(
                         TextDocumentIdentifier::new(uri.clone()),
-                        Position::new(line, 13),
+                        Position::new(line, character),
                     ),
                     work_done_progress_params: Default::default(),
                 })
@@ -698,15 +733,24 @@ mod tests {
                 .unwrap()
         };
 
-        let HoverContents::Markup(found) = hover_at(0).contents else {
-            panic!("expected plain-text hover content");
+        let HoverContents::Markup(found) = hover_at(0, 13).contents else {
+            panic!("expected Markdown hover content");
         };
-        assert_eq!(found.value, "Default value");
+        assert_eq!(found.kind, MarkupKind::Markdown);
+        assert_eq!(found.value, "<strong>Default value</strong>");
 
-        let HoverContents::Markup(missing) = hover_at(1).contents else {
-            panic!("expected plain-text hover content");
+        let HoverContents::Markup(missing) = hover_at(1, 13).contents else {
+            panic!("expected Markdown hover content");
         };
-        assert_eq!(missing.value, "Translation key 'missing' does not exist.");
+        assert_eq!(missing.value, "Translation key `missing` does not exist.");
+
+        let HoverContents::Markup(scope) = hover_at(2, 23).contents else {
+            panic!("expected Markdown hover content");
+        };
+        assert_eq!(
+            scope.value,
+            "- `a`: A\n- `b`: B\n- `c`: C\n- `d`: D\n- `e`: E\n..."
+        );
     }
 
     #[test]

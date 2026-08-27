@@ -76,6 +76,17 @@ impl IndexSnapshot {
             .unwrap_or_default()
     }
 
+    pub fn direct_dictionary_children<'a>(
+        &'a self,
+        scope: &'a CanonicalKey,
+        separator: &'a str,
+    ) -> impl Iterator<Item = &'a DictionaryEntry> + 'a {
+        self.dictionaries
+            .iter()
+            .filter(move |(key, _)| key.parent(separator).as_ref() == Some(scope))
+            .flat_map(|(_, entries)| entries)
+    }
+
     pub fn occurrences(&self, key: &CanonicalKey) -> &[SourceOccurrence] {
         self.occurrences
             .get(key)
