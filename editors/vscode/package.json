@@ -14,7 +14,7 @@
   "categories": ["Programming Languages", "Other"],
   "activationEvents": [
     "onLanguage:typescript", "onLanguage:typescriptreact", "onLanguage:javascript",
-    "onLanguage:javascriptreact", "onLanguage:json", "onCommand:localeBreeze.copyFullKey"
+    "onLanguage:javascriptreact", "onLanguage:json"
   ],
   "main": "./dist/extension.js",
   "contributes": {
