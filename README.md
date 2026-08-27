@@ -11,7 +11,8 @@ Both extensions run the analysis locally: no project source or translations leav
 
 ## Why LocaleBreeze
 
-- Completion by full key, relative key, key fragment, or translated value from any locale.
+- Completion by full key, relative key, or key fragment, prioritized above other suggestions.
+- Hover previews from the default translation file, including a clear message for missing keys.
 - Go to Definition from full keys, scoped keys, and scope declarations to JSON dictionaries.
 - Find References from dictionary properties back to full and scoped calls.
 - Optional unused-key hints on unreferenced default-locale dictionary leaves.

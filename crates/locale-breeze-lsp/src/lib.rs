@@ -25,6 +25,7 @@ pub fn run_stdio(config_override: Option<PathBuf>) -> Result<()> {
             ..Default::default()
         }),
         definition_provider: Some(OneOf::Left(true)),
+        hover_provider: Some(HoverProviderCapability::Simple(true)),
         references_provider: Some(OneOf::Left(true)),
         execute_command_provider: Some(ExecuteCommandOptions {
             commands: vec![RESOLVE_KEY_COMMAND.into()],
@@ -187,6 +188,8 @@ impl Server {
                 .and_then(|p| serialize_optional(self.completion(p)?)),
             "textDocument/definition" => parse::<GotoDefinitionParams>(request.params)
                 .and_then(|p| serialize_optional(self.definition(p)?)),
+            "textDocument/hover" => parse::<HoverParams>(request.params)
+                .and_then(|p| serialize_optional(self.hover(p)?)),
             "textDocument/references" => parse::<ReferenceParams>(request.params)
                 .and_then(|p| serialize_optional(self.references(p)?)),
             "workspace/executeCommand" => parse::<ExecuteCommandParams>(request.params)
@@ -319,7 +322,12 @@ impl Server {
                 detail: Some(candidate.canonical_key),
                 filter_text: Some(candidate.key.clone()),
                 insert_text: Some(candidate.key),
-                sort_text: Some(format!("{:05}", 10_000i64.saturating_sub(candidate.score))),
+                // Keep LocaleBreeze's results ahead of suggestions whose sort text is
+                // derived from their label, while preserving relevance within our list.
+                sort_text: Some(format!(
+                    "00000-{:05}",
+                    10_000i64.saturating_sub(candidate.score)
+                )),
                 ..Default::default()
             })
             .collect();
@@ -348,6 +356,34 @@ impl Server {
             .filter_map(|e| location(&snapshot, &e.uri, &e.key_range))
             .collect::<Vec<_>>();
         Ok((!locations.is_empty()).then_some(GotoDefinitionResponse::Array(locations)))
+    }
+
+    fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+        let Some(workspace) = self.workspace_for_uri(&uri) else {
+            return Ok(None);
+        };
+        let snapshot = workspace.snapshot();
+        let Some(key) =
+            key_at_position(&snapshot, &uri, position, &workspace.config().key_separator)
+        else {
+            return Ok(None);
+        };
+        let default_locale = &workspace.config().default_locale;
+        let text = snapshot
+            .dictionary_entries(&key)
+            .iter()
+            .find(|entry| entry.locale == *default_locale && entry.kind == EntryKind::Leaf)
+            .and_then(|entry| entry.value.clone())
+            .unwrap_or_else(|| format!("Translation key '{}' does not exist.", key.as_str()));
+        Ok(Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::PlainText,
+                value: text,
+            }),
+            range: None,
+        }))
     }
 
     fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
@@ -614,6 +650,63 @@ mod tests {
             }],
         );
         assert_eq!(changed, "const x = 'ok';");
+    }
+
+    #[test]
+    fn hover_shows_default_value_or_missing_key_message() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("locale-breeze.json"),
+            r#"{
+              "dictionaries":"translation.{locale}.json",
+              "defaultLocale":"en",
+              "keySeparator":".",
+              "scopedFunctions":["useScopedTranslation"],
+              "translationMethods":["t"],
+              "fullKeyFunctions":["i18next.t"]
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("translation.en.json"),
+            r#"{"known":"Default value"}"#,
+        )
+        .unwrap();
+        let source_path = temp.path().join("app.ts");
+        std::fs::write(&source_path, "i18next.t('known');\ni18next.t('missing');").unwrap();
+        let workspace = WorkspaceIndex::load(
+            temp.path().to_owned(),
+            &temp.path().join("locale-breeze.json"),
+        )
+        .unwrap();
+        let uri = Url::from_file_path(source_path).unwrap();
+        let server = Server {
+            workspaces: vec![Arc::new(workspace)],
+            watchers: vec![],
+            config_override: None,
+        };
+        let hover_at = |line| {
+            server
+                .hover(HoverParams {
+                    text_document_position_params: TextDocumentPositionParams::new(
+                        TextDocumentIdentifier::new(uri.clone()),
+                        Position::new(line, 13),
+                    ),
+                    work_done_progress_params: Default::default(),
+                })
+                .unwrap()
+                .unwrap()
+        };
+
+        let HoverContents::Markup(found) = hover_at(0).contents else {
+            panic!("expected plain-text hover content");
+        };
+        assert_eq!(found.value, "Default value");
+
+        let HoverContents::Markup(missing) = hover_at(1).contents else {
+            panic!("expected plain-text hover content");
+        };
+        assert_eq!(missing.value, "Translation key 'missing' does not exist.");
     }
 
     #[test]

@@ -196,14 +196,8 @@ impl IndexSnapshot {
                 .find(|e| e.locale == default_locale)
                 .and_then(|e| e.value.as_deref());
             let mut haystacks = vec![normalize(key.as_str()), normalize(&insert)];
-            haystacks.extend(
-                entries
-                    .iter()
-                    .filter_map(|e| e.value.as_deref())
-                    .map(normalize),
-            );
             if objects {
-                for (descendant, values) in self.dictionaries.range(key.clone()..) {
+                for (descendant, _) in self.dictionaries.range(key.clone()..) {
                     if descendant == key
                         || !descendant
                             .as_str()
@@ -216,12 +210,6 @@ impl IndexSnapshot {
                         }
                     }
                     haystacks.push(normalize(descendant.as_str()));
-                    haystacks.extend(
-                        values
-                            .iter()
-                            .filter_map(|e| e.value.as_deref())
-                            .map(normalize),
-                    );
                 }
             }
             let Some(score) = haystacks
@@ -548,7 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn searches_values_and_relative_keys() {
+    fn searches_relative_keys_but_not_values() {
         let uri = Url::parse("file:///translation.en.json").unwrap();
         let text = r#"{"Page":{"Login":{"my_key":"My value"}}}"#.to_string();
         let dictionaries = parse_dictionary(&uri, "en", &text, ".").unwrap();
@@ -562,18 +550,27 @@ mod tests {
         };
         let snapshot = IndexSnapshot::rebuild(1, HashMap::from([(uri, Arc::new(contribution))]));
         let scope = CanonicalKey::new("Page.Login", ".").unwrap();
-        for query in ["my_k", "My value"] {
-            let (found, _) = snapshot.completions(
-                &CompletionContext::ScopedKey {
-                    scope: scope.clone(),
-                    query: query.into(),
-                },
-                "en",
-                ".",
-                20,
-            );
-            assert_eq!(found[0].key, "my_key");
-        }
+        let (found, _) = snapshot.completions(
+            &CompletionContext::ScopedKey {
+                scope: scope.clone(),
+                query: "my_k".into(),
+            },
+            "en",
+            ".",
+            20,
+        );
+        assert_eq!(found[0].key, "my_key");
+
+        let (found, _) = snapshot.completions(
+            &CompletionContext::ScopedKey {
+                scope,
+                query: "My value".into(),
+            },
+            "en",
+            ".",
+            20,
+        );
+        assert!(found.is_empty());
     }
 
     #[test]
