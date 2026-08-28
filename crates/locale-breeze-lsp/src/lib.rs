@@ -13,6 +13,7 @@ use std::sync::Arc;
 use url::Url;
 
 const RESOLVE_KEY_COMMAND: &str = "localeBreeze.resolveFullKey";
+const REFRESH_DOCUMENT_COMMAND: &str = "localeBreeze.refreshDocument";
 
 pub fn run_stdio(config_override: Option<PathBuf>) -> Result<()> {
     let (connection, io_threads) = Connection::stdio();
@@ -28,7 +29,7 @@ pub fn run_stdio(config_override: Option<PathBuf>) -> Result<()> {
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         references_provider: Some(OneOf::Left(true)),
         execute_command_provider: Some(ExecuteCommandOptions {
-            commands: vec![RESOLVE_KEY_COMMAND.into()],
+            commands: vec![RESOLVE_KEY_COMMAND.into(), REFRESH_DOCUMENT_COMMAND.into()],
             ..Default::default()
         }),
         workspace: Some(WorkspaceServerCapabilities {
@@ -483,25 +484,44 @@ impl Server {
     }
 
     fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<String>> {
-        if params.command != RESOLVE_KEY_COMMAND {
-            return Ok(None);
+        match params.command.as_str() {
+            RESOLVE_KEY_COMMAND => {
+                let Some(argument) = params.arguments.first() else {
+                    return Ok(None);
+                };
+                let position: TextDocumentPositionParams =
+                    serde_json::from_value(argument.clone())?;
+                let uri = position.text_document.uri;
+                let Some(workspace) = self.workspace_for_uri(&uri) else {
+                    return Ok(None);
+                };
+                let snapshot = workspace.snapshot();
+                Ok(key_at_position(
+                    &snapshot,
+                    &uri,
+                    position.position,
+                    &workspace.config().key_separator,
+                )
+                .map(|key| key.as_str().to_owned()))
+            }
+            REFRESH_DOCUMENT_COMMAND => {
+                let Some(uri) = params.arguments.first() else {
+                    return Ok(None);
+                };
+                let Some(text) = params.arguments.get(1) else {
+                    return Ok(None);
+                };
+                let uri: Url = serde_json::from_value(uri.clone())?;
+                let text: String = serde_json::from_value(text.clone())?;
+                if let Some(workspace) = self.workspace_for_uri(&uri) {
+                    // No version is intentional: recovery must replace a stale
+                    // versioned snapshot with the editor's current full text.
+                    workspace.update_text(uri, text, None);
+                }
+                Ok(None)
+            }
+            _ => Ok(None),
         }
-        let Some(argument) = params.arguments.first() else {
-            return Ok(None);
-        };
-        let position: TextDocumentPositionParams = serde_json::from_value(argument.clone())?;
-        let uri = position.text_document.uri;
-        let Some(workspace) = self.workspace_for_uri(&uri) else {
-            return Ok(None);
-        };
-        let snapshot = workspace.snapshot();
-        Ok(key_at_position(
-            &snapshot,
-            &uri,
-            position.position,
-            &workspace.config().key_separator,
-        )
-        .map(|key| key.as_str().to_owned()))
     }
 }
 
@@ -707,7 +727,7 @@ mod tests {
     }
 
     #[test]
-    fn hover_shows_default_value_or_missing_key_message() {
+    fn hover_and_dictionary_navigation_recover_from_stale_index() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(
             temp.path().join("locale-breeze.json"),
@@ -721,14 +741,11 @@ mod tests {
             }"#,
         )
         .unwrap();
-        std::fs::write(
-            temp.path().join("translation.en.json"),
-            r#"{
+        let dictionary_text = r#"{
               "known":"<strong>Default value</strong>",
               "scope":{"c":"C","a":"A","f":"F","b":"B","e":"E","d":"D"}
-            }"#,
-        )
-        .unwrap();
+            }"#;
+        std::fs::write(temp.path().join("translation.en.json"), dictionary_text).unwrap();
         let source_path = temp.path().join("app.ts");
         std::fs::write(
             &source_path,
@@ -741,8 +758,9 @@ mod tests {
         )
         .unwrap();
         let uri = Url::from_file_path(source_path).unwrap();
+        let workspace = Arc::new(workspace);
         let server = Server {
-            workspaces: vec![Arc::new(workspace)],
+            workspaces: vec![workspace.clone()],
             watchers: vec![],
             config_override: None,
         };
@@ -779,23 +797,39 @@ mod tests {
         );
 
         let dictionary_uri = Url::from_file_path(temp.path().join("translation.en.json")).unwrap();
-        let definition = server
-            .definition(GotoDefinitionParams {
-                text_document_position_params: TextDocumentPositionParams::new(
-                    TextDocumentIdentifier::new(dictionary_uri),
-                    Position::new(1, 16),
-                ),
-                work_done_progress_params: Default::default(),
-                partial_result_params: Default::default(),
-            })
-            .unwrap()
-            .unwrap();
+        let definition_at_dictionary = || {
+            server
+                .definition(GotoDefinitionParams {
+                    text_document_position_params: TextDocumentPositionParams::new(
+                        TextDocumentIdentifier::new(dictionary_uri.clone()),
+                        Position::new(1, 16),
+                    ),
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                })
+                .unwrap()
+        };
+        let definition = definition_at_dictionary().unwrap();
         let GotoDefinitionResponse::Array(locations) = definition else {
             panic!("expected definition locations");
         };
         assert_eq!(locations.len(), 1);
         assert_eq!(locations[0].uri, uri);
         assert_eq!(locations[0].range.start.line, 0);
+
+        workspace.update_text(dictionary_uri.clone(), "{".into(), Some(99));
+        assert!(definition_at_dictionary().is_none());
+        server
+            .execute_command(ExecuteCommandParams {
+                command: REFRESH_DOCUMENT_COMMAND.into(),
+                arguments: vec![
+                    serde_json::to_value(&dictionary_uri).unwrap(),
+                    serde_json::to_value(dictionary_text).unwrap(),
+                ],
+                work_done_progress_params: Default::default(),
+            })
+            .unwrap();
+        assert!(definition_at_dictionary().is_some());
     }
 
     #[test]

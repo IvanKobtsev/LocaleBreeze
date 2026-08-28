@@ -31,6 +31,7 @@ import com.intellij.usages.UsageSearchPresentation
 import com.intellij.usages.UsageSearcher
 import com.intellij.util.concurrency.AppExecutorUtil
 import org.eclipse.lsp4j.DefinitionParams
+import org.eclipse.lsp4j.ExecuteCommandParams
 import org.eclipse.lsp4j.Position
 import org.eclipse.lsp4j.ReferenceContext
 import org.eclipse.lsp4j.ReferenceParams
@@ -68,18 +69,23 @@ class LocaleBreezeGotoDeclarationHandler : GotoDeclarationHandler {
 
         for (client in clients) {
             val params = DefinitionParams(client.getDocumentIdentifier(file), position)
-            val definitions = requestFromServer("definition") {
-                client.sendRequestSync(2_000) { server ->
-                    server.textDocumentService.definition(params)
-                }
-            }
+            var definitions = requestDefinitions(client, params)
 
-            val definitionTargets = buildList {
+            var definitionTargets = buildList {
                 definitions?.left?.forEach { add(Target(it.uri, it.range)) }
                 definitions?.right?.forEach { add(Target(it.targetUri, it.targetSelectionRange)) }
             }
             val isDictionaryDeclaration =
                 PsiTreeUtil.getParentOfType(element, JsonProperty::class.java, false) != null
+
+            if (isDictionaryDeclaration && definitionTargets.isEmpty()) {
+                refreshDocument(client, file, document.text)
+                definitions = requestDefinitions(client, params)
+                definitionTargets = buildList {
+                    definitions?.left?.forEach { add(Target(it.uri, it.range)) }
+                    definitions?.right?.forEach { add(Target(it.targetUri, it.targetSelectionRange)) }
+                }
+            }
             val hasSelfDefinition = definitionTargets.any { it.isOrigin(client, file, position) }
             val externalDefinitionTargets = definitionTargets.filterNot { it.isOrigin(client, file, position) }
 
@@ -116,6 +122,26 @@ class LocaleBreezeGotoDeclarationHandler : GotoDeclarationHandler {
     }
 
     override fun getActionText(context: DataContext): String? = null
+
+    private fun requestDefinitions(client: LspClient, params: DefinitionParams) =
+        requestFromServer("definition") {
+            client.sendRequestSync(2_000) { server ->
+                server.textDocumentService.definition(params)
+            }
+        }
+
+    private fun refreshDocument(client: LspClient, file: VirtualFile, text: String) {
+        requestFromServer("document refresh") {
+            client.sendRequestSync(2_000) { server ->
+                server.workspaceService.executeCommand(
+                    ExecuteCommandParams(
+                        "localeBreeze.refreshDocument",
+                        listOf(client.getDocumentIdentifier(file).uri, text),
+                    ),
+                )
+            }
+        }
+    }
 
     private fun <T> requestFromServer(operation: String, request: () -> T): T? =
         runCatching {
