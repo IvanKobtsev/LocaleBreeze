@@ -1,5 +1,6 @@
 package dev.localebreeze.jetbrains
 
+import com.intellij.json.psi.JsonProperty
 import com.intellij.codeInsight.navigation.actions.GotoDeclarationHandler
 import com.intellij.find.actions.ShowUsagesAction
 import com.intellij.find.actions.ShowUsagesActionHandler
@@ -22,6 +23,7 @@ import com.intellij.psi.SmartPsiElementPointer
 import com.intellij.psi.impl.FakePsiElement
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.search.SearchScope
+import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.ui.awt.RelativePoint
 import com.intellij.usageView.UsageInfo
 import com.intellij.usages.UsageInfo2UsageAdapter
@@ -40,8 +42,8 @@ import java.util.concurrent.TimeUnit
  *
  * WebStorm otherwise combines LSP targets with its JavaScript/JSON symbol targets,
  * which creates duplicates and unrelated same-name destinations. Dictionary
- * declarations have a self-definition, so they intentionally fall through to
- * references and navigate to their source usages instead.
+ * declarations use the richer usages popup so each source location includes a
+ * code preview instead of WebStorm's generic target-name chooser.
  */
 class LocaleBreezeGotoDeclarationHandler : GotoDeclarationHandler {
     override fun getGotoDeclarationTargets(
@@ -76,14 +78,22 @@ class LocaleBreezeGotoDeclarationHandler : GotoDeclarationHandler {
                 definitions?.left?.forEach { add(Target(it.uri, it.range)) }
                 definitions?.right?.forEach { add(Target(it.targetUri, it.targetSelectionRange)) }
             }
-            val isDictionaryDeclaration = definitionTargets.any { it.isOrigin(client, file, position) }
+            val isDictionaryDeclaration =
+                PsiTreeUtil.getParentOfType(element, JsonProperty::class.java, false) != null
+            val hasSelfDefinition = definitionTargets.any { it.isOrigin(client, file, position) }
             val externalDefinitionTargets = definitionTargets.filterNot { it.isOrigin(client, file, position) }
+
+            if (isDictionaryDeclaration && externalDefinitionTargets.isNotEmpty()) {
+                val usages = mapTargets(client, externalDefinitionTargets)
+                return arrayOf<PsiElement>(LocaleBreezeUsagesTarget(element, actualEditor, usages))
+            }
 
             mapTargets(client, externalDefinitionTargets).takeIf { it.isNotEmpty() }?.let {
                 return it.toTypedArray()
             }
 
-            if (!isDictionaryDeclaration) continue
+            // Compatibility with servers that return the dictionary declaration itself.
+            if (!isDictionaryDeclaration || !hasSelfDefinition) continue
 
             val references = requestFromServer("references") {
                 client.sendRequestSync(2_000) { server ->
