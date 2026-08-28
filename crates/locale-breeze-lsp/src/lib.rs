@@ -7,7 +7,7 @@ use lsp_types::*;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use url::Url;
@@ -344,17 +344,36 @@ impl Server {
             return Ok(None);
         };
         let snapshot = workspace.snapshot();
+        let Some(offset) = position_offset(&snapshot, &uri, position) else {
+            return Ok(None);
+        };
         let Some(key) =
             key_at_position(&snapshot, &uri, position, &workspace.config().key_separator)
         else {
             return Ok(None);
         };
-        let locations = snapshot
-            .dictionary_entries(&key)
-            .iter()
-            .filter(|entry| entry.locale == workspace.config().default_locale)
-            .filter_map(|e| location(&snapshot, &e.uri, &e.key_range))
-            .collect::<Vec<_>>();
+        let locations = if snapshot.dictionary_at(&uri, offset).is_some() {
+            let is_scope = snapshot
+                .dictionary_entries(&key)
+                .iter()
+                .any(|entry| entry.kind == EntryKind::Object);
+            let occurrences: Vec<_> = if is_scope {
+                snapshot.scope_occurrences(&key, &workspace.config().key_separator, 32)
+            } else {
+                snapshot.occurrences(&key).iter().collect()
+            };
+            occurrences
+                .into_iter()
+                .filter_map(|occurrence| location(&snapshot, &occurrence.uri, &occurrence.range))
+                .collect::<Vec<_>>()
+        } else {
+            snapshot
+                .dictionary_entries(&key)
+                .iter()
+                .filter(|entry| entry.locale == workspace.config().default_locale)
+                .filter_map(|entry| location(&snapshot, &entry.uri, &entry.key_range))
+                .collect::<Vec<_>>()
+        };
         Ok((!locations.is_empty()).then_some(GotoDefinitionResponse::Array(locations)))
     }
 
@@ -382,7 +401,14 @@ impl Server {
                     .direct_dictionary_children(&key, &workspace.config().key_separator)
                     .filter(|child| child.locale == *default_locale)
                     .collect::<Vec<_>>();
-                children.dedup_by(|left, right| left.key == right.key);
+                children.sort_by(|left, right| {
+                    left.uri
+                        .as_str()
+                        .cmp(right.uri.as_str())
+                        .then(left.key_range.0.start.cmp(&right.key_range.0.start))
+                });
+                let mut seen = HashSet::new();
+                children.retain(|child| seen.insert(child.key.clone()));
                 let has_more = children.len() > 5;
                 let mut preview = children
                     .into_iter()
@@ -699,7 +725,7 @@ mod tests {
             temp.path().join("translation.en.json"),
             r#"{
               "known":"<strong>Default value</strong>",
-              "scope":{"a":"A","b":"B","c":"C","d":"D","e":"E","f":"F"}
+              "scope":{"c":"C","a":"A","f":"F","b":"B","e":"E","d":"D"}
             }"#,
         )
         .unwrap();
@@ -749,8 +775,27 @@ mod tests {
         };
         assert_eq!(
             scope.value,
-            "- `a`: A\n- `b`: B\n- `c`: C\n- `d`: D\n- `e`: E\n..."
+            "- `c`: C\n- `a`: A\n- `f`: F\n- `b`: B\n- `e`: E\n..."
         );
+
+        let dictionary_uri = Url::from_file_path(temp.path().join("translation.en.json")).unwrap();
+        let definition = server
+            .definition(GotoDefinitionParams {
+                text_document_position_params: TextDocumentPositionParams::new(
+                    TextDocumentIdentifier::new(dictionary_uri),
+                    Position::new(1, 16),
+                ),
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            })
+            .unwrap()
+            .unwrap();
+        let GotoDefinitionResponse::Array(locations) = definition else {
+            panic!("expected definition locations");
+        };
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].uri, uri);
+        assert_eq!(locations[0].range.start.line, 0);
     }
 
     #[test]

@@ -28,7 +28,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       { scheme: 'file', language: 'json' }
     ],
     synchronize: { configurationSection: 'localeBreeze', fileEvents: configWatcher },
-    outputChannelName: 'LocaleBreeze'
+    outputChannelName: 'LocaleBreeze',
+    middleware: {
+      async provideHover(document, position, token, next) {
+        const hover = await next(document, position, token);
+        if (!hover) return hover;
+        for (const content of hover.contents) {
+          if (content instanceof vscode.MarkdownString) content.supportHtml = true;
+        }
+        return hover;
+      }
+    }
   };
   client = new LanguageClient('localeBreeze', 'LocaleBreeze', serverOptions, clientOptions);
   context.subscriptions.push(vscode.commands.registerCommand('localeBreeze.copyFullKey', copyFullKey));

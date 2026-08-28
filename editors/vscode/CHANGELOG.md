@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0
+
+- Added rendered default-translation and scope previews on hover.
+- Restored navigation from dictionary keys to their source usages.
+- Preserved dictionary source order in scope previews.
+- Prioritized LocaleBreeze completions and removed value-based completion matching.
+
 ## 0.1.3
 
 - Fixed an activation failure caused by the copy-path UI command colliding with the language server's internal command.

@@ -28,7 +28,7 @@ LocaleBreeze is currently an MVP focused on literal i18next translation flows. I
 - Bindings are followed inside their lexical block; passed, returned, imported, or reassigned translators are not followed.
 - One dictionary pattern and logical translation module are supported per workspace.
 - Only string-valued JSON leaves are indexed; arrays and non-string leaves are ignored.
-- Missing-key diagnostics, rename, hover, CodeLens, namespaces, and cross-file data flow are not available yet.
+- Missing-key diagnostics, rename, CodeLens, namespaces, and cross-file data flow are not available yet.
 - The JetBrains integration currently targets the 2026.2 IDE line.
 
 ## Supported usage

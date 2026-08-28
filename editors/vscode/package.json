@@ -2,7 +2,7 @@
   "name": "locale-breeze",
   "displayName": "LocaleBreeze",
   "description": "Context-aware i18n navigation and completion powered by LocaleBreeze.",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "publisher": "ivankobtsev",
   "repository": { "type": "git", "url": "https://github.com/IvanKobtsev/LocaleBreeze.git" },
   "homepage": "https://github.com/IvanKobtsev/LocaleBreeze#readme",
