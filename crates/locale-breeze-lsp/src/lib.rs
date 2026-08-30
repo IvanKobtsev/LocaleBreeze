@@ -885,6 +885,19 @@ mod tests {
             workspace.update_text(webstorm_uri, r#"{"my_key":"Value"}"#.into(), Some(1));
             assert!(diagnostic_notifications(&workspace, &published).is_empty());
         }
+
+        std::fs::write(
+            temp.path().join("translation.en.json"),
+            "{\n\n  \"my_key\": \"Value\"\n}",
+        )
+        .unwrap();
+        workspace.refresh_disk_path(&temp.path().join("translation.en.json"));
+        let refreshed = diagnostic_notifications(&workspace, &published);
+        assert_eq!(refreshed.len(), 1);
+        let refreshed_params: PublishDiagnosticsParams =
+            serde_json::from_value(refreshed[0].params.clone()).unwrap();
+        assert_eq!(refreshed_params.diagnostics.len(), 1);
+        assert_eq!(refreshed_params.diagnostics[0].range.start.line, 2);
     }
 
     #[test]

@@ -432,13 +432,6 @@ impl WorkspaceIndex {
         };
         let file_key = normalized_uri(&uri);
         let current = self.snapshot.load_full();
-        if current
-            .files
-            .get(&file_key)
-            .is_some_and(|file| file.version.is_some())
-        {
-            return;
-        }
         let pattern = self.config.dictionary_pattern().expect("validated pattern");
         let mut files = current.files.clone();
         if let Some(contribution) = self.parse_disk_file(path, &pattern) {
@@ -824,5 +817,48 @@ mod tests {
         workspace.update_text(uri, r#"{"Page":{"new":"New"}}"#.into(), Some(2));
         let key = CanonicalKey::new("Page.new", ".").unwrap();
         assert_eq!(workspace.snapshot().dictionary_entries(&key).len(), 1);
+    }
+
+    #[test]
+    fn external_disk_change_refreshes_an_open_document_and_resets_its_version() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("locale-breeze.json"),
+            r#"{
+              "dictionaries":"translation.{locale}.json",
+              "defaultLocale":"en",
+              "keySeparator":".",
+              "scopedFunctions":["useScopedTranslation"],
+              "translationMethods":["t"],
+              "fullKeyFunctions":["i18next.t"]
+            }"#,
+        )
+        .unwrap();
+        let dictionary_path = temp.path().join("translation.en.json");
+        std::fs::write(&dictionary_path, r#"{"Page":{"key":"Value"}}"#).unwrap();
+        let workspace = WorkspaceIndex::load(
+            temp.path().to_owned(),
+            &temp.path().join("locale-breeze.json"),
+        )
+        .unwrap();
+        let uri = Url::from_file_path(&dictionary_path).unwrap();
+
+        workspace.update_text(uri.clone(), r#"{"Page":{"key":"Editor"}}"#.into(), Some(10));
+        let disk_text = "{\n  \"Page\": {\n    \"key\": \"External\"\n  }\n}";
+        std::fs::write(&dictionary_path, disk_text).unwrap();
+        workspace.refresh_disk_path(&dictionary_path);
+        assert_eq!(workspace.snapshot().text(&uri), Some(disk_text));
+
+        // An editor may restart its document version after reloading an
+        // external change. The disk refresh must let that lower version win.
+        workspace.update_text(
+            uri.clone(),
+            r#"{"Page":{"key":"Reloaded"}}"#.into(),
+            Some(1),
+        );
+        assert_eq!(
+            workspace.snapshot().text(&uri),
+            Some(r#"{"Page":{"key":"Reloaded"}}"#)
+        );
     }
 }

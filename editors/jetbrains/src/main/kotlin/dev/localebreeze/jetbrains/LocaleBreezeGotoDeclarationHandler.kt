@@ -94,6 +94,17 @@ class LocaleBreezeGotoDeclarationHandler : GotoDeclarationHandler {
                 return arrayOf<PsiElement>(LocaleBreezeUsagesTarget(element, actualEditor, usages))
             }
 
+            // A recognized dictionary key with no usages has no definition
+            // targets. Returning an empty result makes LocaleBreeze authoritative
+            // and prevents WebStorm from navigating to unrelated JSON symbols.
+            if (
+                isDictionaryDeclaration &&
+                definitionTargets.isEmpty() &&
+                resolveKey(client, file, position) != null
+            ) {
+                return emptyArray()
+            }
+
             mapTargets(client, externalDefinitionTargets).takeIf { it.isNotEmpty() }?.let {
                 return it.toTypedArray()
             }
@@ -142,6 +153,26 @@ class LocaleBreezeGotoDeclarationHandler : GotoDeclarationHandler {
             }
         }
     }
+
+    private fun resolveKey(client: LspClient, file: VirtualFile, position: Position): Any? =
+        requestFromServer("key resolution") {
+            client.sendRequestSync(2_000) { server ->
+                server.workspaceService.executeCommand(
+                    ExecuteCommandParams(
+                        "localeBreeze.resolveFullKey",
+                        listOf(
+                            mapOf(
+                                "textDocument" to mapOf("uri" to client.getDocumentIdentifier(file).uri),
+                                "position" to mapOf(
+                                    "line" to position.line,
+                                    "character" to position.character,
+                                ),
+                            ),
+                        ),
+                    ),
+                )
+            }
+        }
 
     private fun <T> requestFromServer(operation: String, request: () -> T): T? =
         runCatching {
