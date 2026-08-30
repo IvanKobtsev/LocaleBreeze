@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1
+
+- Fixed duplicate unused-key warnings caused by alternate Windows file URIs.
+- Refreshed unused-key highlighting after external file changes.
+- Prevented WebStorm from falling back to unrelated navigation for unused translation keys.
+
 ## 0.2.0
 
 - Added rendered default-translation and scope previews on hover.
