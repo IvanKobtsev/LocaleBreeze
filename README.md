@@ -49,7 +49,7 @@ i18next.t('Page.Login.submit');
 
 Copy `locale-breeze.example.json` to `locale-breeze.json` at the workspace root and adjust the dictionary pattern. The pattern must contain exactly one `{locale}` token, and the configured default locale must have a matching file.
 
-Set `"unusedKeys": true` to report unreferenced leaf keys in the default-locale dictionary as warnings in the editor and Problems panel. Since LocaleBreeze intentionally analyzes only supported literal translation flows, dynamic or otherwise unsupported references are not counted as uses.
+Set `"unusedKeys": true` to fade unreferenced leaf keys in the default-locale dictionary and report them as warnings in the editor and Problems panel. Since LocaleBreeze intentionally analyzes only supported literal translation flows, dynamic or otherwise unsupported references are not counted as uses.
 
 Set `"translationKeyTypes": ["TranslationKey"]` to recognize string literals with an explicit matching type annotation, `as` assertion, or `satisfies` clause. Set `"translationKeyProps": ["transKey"]` to recognize literal values of matching JSX attributes and object properties. These checks are lexical and do not start a TypeScript type checker.
 

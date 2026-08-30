@@ -678,9 +678,7 @@ fn diagnostic_notifications(
                 source: Some("locale-breeze".into()),
                 message: format!("Translation key \"{}\" seems unused", entry.key),
                 related_information: None,
-                // WebStorm renders an `Unnecessary` tag as a separate annotation in
-                // addition to the warning, which duplicates the message on hover.
-                tags: None,
+                tags: Some(vec![DiagnosticTag::UNNECESSARY]),
                 data: None,
             });
         }
@@ -868,8 +866,25 @@ mod tests {
             params.diagnostics[0].message,
             "Translation key \"my_key\" seems unused"
         );
-        assert!(params.diagnostics[0].tags.is_none());
+        assert_eq!(
+            params.diagnostics[0].tags,
+            Some(vec![DiagnosticTag::UNNECESSARY])
+        );
         assert!(diagnostic_notifications(&workspace, &published).is_empty());
+
+        #[cfg(windows)]
+        {
+            let canonical = params.uri.as_str().strip_prefix("file:///").unwrap();
+            let (drive, rest) = canonical.split_once(':').unwrap();
+            let webstorm_uri = Url::parse(&format!(
+                "file:///{}%3A{}",
+                drive.to_ascii_lowercase(),
+                rest
+            ))
+            .unwrap();
+            workspace.update_text(webstorm_uri, r#"{"my_key":"Value"}"#.into(), Some(1));
+            assert!(diagnostic_notifications(&workspace, &published).is_empty());
+        }
     }
 
     #[test]

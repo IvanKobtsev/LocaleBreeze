@@ -364,7 +364,9 @@ impl WorkspaceIndex {
 
     pub fn update_text(&self, uri: Url, text: String, version: Option<i32>) {
         let file_key = normalized_uri(&uri);
-        if let Some(current) = self.snapshot.load().files.get(&file_key)
+        let current = self.snapshot.load_full();
+        let current_file = current.files.get(&file_key);
+        if let Some(current) = current_file
             && current
                 .version
                 .zip(version)
@@ -372,8 +374,15 @@ impl WorkspaceIndex {
         {
             return;
         }
+        // Keep the URI that originally identified the indexed file. Some LSP
+        // clients send the same Windows path later with a lower-case drive and
+        // an encoded colon (`file:///c%3A/...`). Letting that spelling replace
+        // the disk URI makes clients such as WebStorm retain two diagnostics
+        // collections for the same physical file.
+        let uri = current_file
+            .map(|file| file.uri.clone())
+            .unwrap_or_else(|| canonical_file_uri(&uri));
         let contribution = self.parse_text(uri.clone(), text.clone(), version);
-        let current = self.snapshot.load_full();
         let mut files = current.files.clone();
         if let Some(contribution) = contribution {
             files.insert(file_key.clone(), Arc::new(contribution));
@@ -511,10 +520,19 @@ fn normalized_uri(uri: &Url) -> Url {
     #[cfg(windows)]
     {
         if uri.scheme() == "file" {
-            let mut normalized = uri.clone();
-            normalized.set_path(&uri.path().to_lowercase());
-            return normalized;
+            let canonical = canonical_file_uri(uri);
+            return Url::parse(&canonical.as_str().to_ascii_lowercase()).unwrap_or(canonical);
         }
+    }
+    uri.clone()
+}
+
+fn canonical_file_uri(uri: &Url) -> Url {
+    if uri.scheme() == "file"
+        && let Ok(path) = uri.to_file_path()
+        && let Ok(canonical) = Url::from_file_path(path)
+    {
+        return canonical;
     }
     uri.clone()
 }
@@ -532,7 +550,7 @@ mod tests {
     #[test]
     fn file_lookup_ignores_windows_uri_casing() {
         let indexed_uri = Url::parse("file:///C:/Project/App.ts").unwrap();
-        let requested_uri = Url::parse("file:///c:/project/app.ts").unwrap();
+        let requested_uri = Url::parse("file:///c%3A/project/app.ts").unwrap();
         let contribution = FileContribution {
             uri: indexed_uri.clone(),
             text: "const value = 1;".into(),
@@ -541,9 +559,12 @@ mod tests {
             occurrences: vec![],
             bindings: vec![],
         };
-        let snapshot =
-            IndexSnapshot::rebuild(1, HashMap::from([(indexed_uri, Arc::new(contribution))]));
+        let snapshot = IndexSnapshot::rebuild(
+            1,
+            HashMap::from([(indexed_uri.clone(), Arc::new(contribution))]),
+        );
         assert_eq!(snapshot.text(&requested_uri), Some("const value = 1;"));
+        assert_eq!(normalized_uri(&indexed_uri), normalized_uri(&requested_uri));
     }
 
     #[test]
