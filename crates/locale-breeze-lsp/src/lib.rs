@@ -9,7 +9,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use url::Url;
 
 const RESOLVE_KEY_COMMAND: &str = "localeBreeze.resolveFullKey";
@@ -18,8 +18,15 @@ const REFRESH_DOCUMENT_COMMAND: &str = "localeBreeze.refreshDocument";
 pub fn run_stdio(config_override: Option<PathBuf>) -> Result<()> {
     let (connection, io_threads) = Connection::stdio();
     let capabilities = ServerCapabilities {
-        text_document_sync: Some(TextDocumentSyncCapability::Kind(
-            TextDocumentSyncKind::INCREMENTAL,
+        text_document_sync: Some(TextDocumentSyncCapability::Options(
+            TextDocumentSyncOptions {
+                open_close: Some(true),
+                change: Some(TextDocumentSyncKind::INCREMENTAL),
+                save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
+                    include_text: Some(true),
+                })),
+                ..Default::default()
+            },
         )),
         completion_provider: Some(CompletionOptions {
             trigger_characters: Some(vec!["\"".into(), "'".into(), ".".into()]),
@@ -54,6 +61,7 @@ struct Server {
     workspaces: Vec<Arc<WorkspaceIndex>>,
     watchers: Vec<RecommendedWatcher>,
     config_override: Option<PathBuf>,
+    published_diagnostics: Arc<Mutex<HashMap<Url, Vec<Diagnostic>>>>,
 }
 
 impl Server {
@@ -62,6 +70,7 @@ impl Server {
             workspaces: vec![],
             watchers: vec![],
             config_override,
+            published_diagnostics: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -92,19 +101,15 @@ impl Server {
                 let workspace = Arc::new(workspace);
                 let watched = workspace.clone();
                 let sender = connection.sender.clone();
+                let published_diagnostics = self.published_diagnostics.clone();
                 match notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
                     if let Ok(event) = event {
                         for path in event.paths {
-                            if let Ok(uri) = Url::from_file_path(&path) {
-                                let clear = Notification::new(
-                                    "textDocument/publishDiagnostics".into(),
-                                    PublishDiagnosticsParams::new(uri, Vec::new(), None),
-                                );
-                                let _ = sender.send(Message::Notification(clear));
-                            }
                             watched.refresh_disk_path(&path);
                         }
-                        for notification in diagnostic_notifications(&watched) {
+                        for notification in
+                            diagnostic_notifications(&watched, &published_diagnostics)
+                        {
                             let _ = sender.send(Message::Notification(notification));
                         }
                     }
@@ -129,7 +134,7 @@ impl Server {
                 self.workspaces
                     .sort_by_key(|w| std::cmp::Reverse(w.root().components().count()));
                 if let Some(workspace) = self.workspace_for_uri(&uri) {
-                    publish_diagnostics(connection, workspace);
+                    publish_diagnostics(connection, workspace, &self.published_diagnostics);
                 }
             }
             Err(error) => log(
@@ -154,7 +159,7 @@ impl Server {
             .filter_map(|workspace| Url::from_file_path(workspace.root()).ok())
             .collect();
         for workspace in &self.workspaces {
-            clear_diagnostics(connection, workspace);
+            clear_diagnostics(connection, workspace, &self.published_diagnostics);
         }
         self.workspaces.clear();
         self.watchers.clear();
@@ -225,7 +230,7 @@ impl Server {
                             p.text_document.text,
                             Some(p.text_document.version),
                         );
-                        publish_diagnostics(connection, w);
+                        publish_diagnostics(connection, w, &self.published_diagnostics);
                     }
                 }
             }
@@ -240,7 +245,7 @@ impl Server {
                                 updated,
                                 Some(p.text_document.version),
                             );
-                            publish_diagnostics(connection, w);
+                            publish_diagnostics(connection, w, &self.published_diagnostics);
                         }
                     }
                 }
@@ -249,8 +254,17 @@ impl Server {
                 if let Ok(p) = parse::<DidCloseTextDocumentParams>(notification.params) {
                     if let Some(w) = self.workspace_for_uri(&p.text_document.uri) {
                         w.close_document(&p.text_document.uri);
-                        publish_diagnostics(connection, w);
+                        publish_diagnostics(connection, w, &self.published_diagnostics);
                     }
+                }
+            }
+            "textDocument/didSave" => {
+                if let Ok(p) = parse::<DidSaveTextDocumentParams>(notification.params)
+                    && let Some(text) = p.text
+                    && let Some(w) = self.workspace_for_uri(&p.text_document.uri)
+                {
+                    w.update_text(p.text_document.uri, text, None);
+                    publish_diagnostics(connection, w, &self.published_diagnostics);
                 }
             }
             "workspace/didChangeWorkspaceFolders" => {
@@ -262,7 +276,11 @@ impl Server {
                                 .iter()
                                 .filter(|w| same_path(w.root(), &path))
                             {
-                                clear_diagnostics(connection, workspace);
+                                clear_diagnostics(
+                                    connection,
+                                    workspace,
+                                    &self.published_diagnostics,
+                                );
                             }
                             self.workspaces
                                 .retain(|workspace| !same_path(workspace.root(), &path));
@@ -633,7 +651,10 @@ fn path_is_within(path: &std::path::Path, root: &std::path::Path) -> bool {
     })
 }
 
-fn diagnostic_notifications(workspace: &WorkspaceIndex) -> Vec<Notification> {
+fn diagnostic_notifications(
+    workspace: &WorkspaceIndex,
+    published: &Mutex<HashMap<Url, Vec<Diagnostic>>>,
+) -> Vec<Notification> {
     let snapshot = workspace.snapshot();
     let mut by_uri: HashMap<Url, Vec<Diagnostic>> = HashMap::new();
     for entry in snapshot.default_locale_leaf_entries(&workspace.config().default_locale) {
@@ -644,45 +665,79 @@ fn diagnostic_notifications(workspace: &WorkspaceIndex) -> Vec<Notification> {
         {
             diagnostics.push(Diagnostic {
                 range,
-                severity: Some(DiagnosticSeverity::HINT),
+                severity: Some(DiagnosticSeverity::WARNING),
                 code: None,
                 code_description: None,
                 source: Some("locale-breeze".into()),
-                message: "Translation key is unused".into(),
+                message: format!("Translation key \"{}\" seems unused", entry.key),
                 related_information: None,
                 tags: Some(vec![DiagnosticTag::UNNECESSARY]),
                 data: None,
             });
         }
     }
-    let mut diagnostics = by_uri.into_iter().collect::<Vec<_>>();
-    diagnostics.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
-    diagnostics
-        .into_iter()
-        .map(|(uri, diagnostics)| {
+    let mut cache = published
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut uris = by_uri.keys().cloned().collect::<Vec<_>>();
+    uris.extend(cache.keys().filter_map(|uri| {
+        uri.to_file_path()
+            .ok()
+            .filter(|path| path_is_within(path, workspace.root()))
+            .map(|_| uri.clone())
+    }));
+    uris.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    uris.dedup();
+
+    uris.into_iter()
+        .filter_map(|uri| {
+            let diagnostics = by_uri.remove(&uri).unwrap_or_default();
+            if cache.get(&uri) == Some(&diagnostics) {
+                return None;
+            }
+            cache.insert(uri.clone(), diagnostics.clone());
             Notification::new(
                 "textDocument/publishDiagnostics".into(),
                 PublishDiagnosticsParams::new(uri, diagnostics, None),
             )
+            .into()
         })
         .collect()
 }
 
-fn publish_diagnostics(connection: &Connection, workspace: &WorkspaceIndex) {
-    for notification in diagnostic_notifications(workspace) {
+fn publish_diagnostics(
+    connection: &Connection,
+    workspace: &WorkspaceIndex,
+    published: &Mutex<HashMap<Url, Vec<Diagnostic>>>,
+) {
+    for notification in diagnostic_notifications(workspace, published) {
         let _ = connection.sender.send(Message::Notification(notification));
     }
 }
 
-fn clear_diagnostics(connection: &Connection, workspace: &WorkspaceIndex) {
+fn clear_diagnostics(
+    connection: &Connection,
+    workspace: &WorkspaceIndex,
+    published: &Mutex<HashMap<Url, Vec<Diagnostic>>>,
+) {
     let snapshot = workspace.snapshot();
     let mut uris = snapshot
         .default_locale_leaf_entries(&workspace.config().default_locale)
         .map(|entry| entry.uri.clone())
         .collect::<Vec<_>>();
+    let mut cache = published
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    uris.extend(cache.keys().filter_map(|uri| {
+        uri.to_file_path()
+            .ok()
+            .filter(|path| path_is_within(path, workspace.root()))
+            .map(|_| uri.clone())
+    }));
     uris.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     uris.dedup();
     for uri in uris {
+        cache.remove(&uri);
         let notification = Notification::new(
             "textDocument/publishDiagnostics".into(),
             PublishDiagnosticsParams::new(uri, Vec::new(), None),
@@ -727,6 +782,50 @@ mod tests {
     }
 
     #[test]
+    fn suppresses_duplicate_unused_key_diagnostics() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("locale-breeze.json"),
+            r#"{
+              "dictionaries":"translation.{locale}.json",
+              "defaultLocale":"en",
+              "keySeparator":".",
+              "scopedFunctions":["useScopedTranslation"],
+              "translationMethods":["t"],
+              "fullKeyFunctions":["i18next.t"],
+              "unusedKeys":true
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("translation.en.json"),
+            r#"{"my_key":"Value"}"#,
+        )
+        .unwrap();
+        let workspace = WorkspaceIndex::load(
+            temp.path().to_owned(),
+            &temp.path().join("locale-breeze.json"),
+        )
+        .unwrap();
+        let published = Mutex::new(HashMap::new());
+
+        let first = diagnostic_notifications(&workspace, &published);
+        assert_eq!(first.len(), 1);
+        let params: PublishDiagnosticsParams =
+            serde_json::from_value(first[0].params.clone()).unwrap();
+        assert_eq!(params.diagnostics.len(), 1);
+        assert_eq!(
+            params.diagnostics[0].severity,
+            Some(DiagnosticSeverity::WARNING)
+        );
+        assert_eq!(
+            params.diagnostics[0].message,
+            "Translation key \"my_key\" seems unused"
+        );
+        assert!(diagnostic_notifications(&workspace, &published).is_empty());
+    }
+
+    #[test]
     fn hover_and_dictionary_navigation_recover_from_stale_index() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -763,6 +862,7 @@ mod tests {
             workspaces: vec![workspace.clone()],
             watchers: vec![],
             config_override: None,
+            published_diagnostics: Default::default(),
         };
         let hover_at = |line, character| {
             server
@@ -863,6 +963,7 @@ mod tests {
             workspaces: vec![Arc::new(workspace)],
             watchers: vec![],
             config_override: None,
+            published_diagnostics: Default::default(),
         };
         let result = server
             .execute_command(ExecuteCommandParams {

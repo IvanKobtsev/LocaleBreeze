@@ -30,6 +30,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     synchronize: { configurationSection: 'localeBreeze', fileEvents: configWatcher },
     outputChannelName: 'LocaleBreeze',
     middleware: {
+      async provideDefinition(document, position, token, next) {
+        let definitions = await next(document, position, token);
+        const hasDefinitions = Array.isArray(definitions) ? definitions.length > 0 : Boolean(definitions);
+        if (hasDefinitions || document.languageId !== 'json' || !client) return definitions;
+        await client.sendRequest('workspace/executeCommand', {
+          command: 'localeBreeze.refreshDocument',
+          arguments: [document.uri.toString(), document.getText()]
+        });
+        definitions = await next(document, position, token);
+        return definitions;
+      },
       async provideHover(document, position, token, next) {
         const hover = await next(document, position, token);
         if (!hover) return hover;
