@@ -110,6 +110,9 @@ impl Server {
                         for notification in
                             diagnostic_notifications(&watched, &published_diagnostics)
                         {
+                            if let Some(trace) = diagnostic_trace_notification(&notification) {
+                                let _ = sender.send(Message::Notification(trace));
+                            }
                             let _ = sender.send(Message::Notification(notification));
                         }
                     }
@@ -128,7 +131,11 @@ impl Server {
                 log(
                     connection,
                     MessageType::INFO,
-                    format!("LocaleBreeze indexed {}", root.display()),
+                    format!(
+                        "LocaleBreeze server pid={} indexed {}",
+                        std::process::id(),
+                        root.display()
+                    ),
                 );
                 self.workspaces.push(workspace);
                 self.workspaces
@@ -713,8 +720,45 @@ fn publish_diagnostics(
     published: &Mutex<HashMap<Url, Vec<Diagnostic>>>,
 ) {
     for notification in diagnostic_notifications(workspace, published) {
+        if let Some(trace) = diagnostic_trace_notification(&notification) {
+            let _ = connection.sender.send(Message::Notification(trace));
+        }
         let _ = connection.sender.send(Message::Notification(notification));
     }
+}
+
+fn diagnostic_trace_notification(notification: &Notification) -> Option<Notification> {
+    let params =
+        serde_json::from_value::<PublishDiagnosticsParams>(notification.params.clone()).ok()?;
+    let entries = params
+        .diagnostics
+        .iter()
+        .map(|diagnostic| {
+            format!(
+                "{}:{}-{}:{} {}",
+                diagnostic.range.start.line,
+                diagnostic.range.start.character,
+                diagnostic.range.end.line,
+                diagnostic.range.end.character,
+                diagnostic.message
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let message = format!(
+        "LocaleBreeze diagnostics pid={} uri={} count={} [{}]",
+        std::process::id(),
+        params.uri,
+        params.diagnostics.len(),
+        entries
+    );
+    Some(Notification::new(
+        "window/logMessage".into(),
+        LogMessageParams {
+            typ: MessageType::INFO,
+            message,
+        },
+    ))
 }
 
 fn clear_diagnostics(

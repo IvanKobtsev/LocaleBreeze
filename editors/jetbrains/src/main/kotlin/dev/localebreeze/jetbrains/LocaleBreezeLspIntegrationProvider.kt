@@ -6,8 +6,10 @@ import com.intellij.notification.NotificationType
 import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.Key
 import com.intellij.openapi.util.SystemInfoRt
 import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.platform.lsp.api.LspClientManager
 import com.intellij.platform.lsp.api.LspIntegrationProvider
 import com.intellij.platform.lsp.api.ProjectWideLspClientDescriptor
 import com.intellij.platform.lsp.api.customization.LspCustomization
@@ -17,18 +19,28 @@ import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap
 
 class LocaleBreezeLspIntegrationProvider : LspIntegrationProvider {
+    private val log = Logger.getInstance(LocaleBreezeLspIntegrationProvider::class.java)
+
     override fun fileOpened(
         project: Project,
         file: VirtualFile,
         clientStarter: LspIntegrationProvider.LspClientStarter,
     ) {
         if (!isSupported(file)) return
-        val executable = LocaleBreezeExecutable.resolve(project)
-        if (executable == null) {
+        if (LocaleBreezeExecutable.resolve(project) == null) {
             notifyMissingExecutable(project)
             return
         }
-        clientStarter.ensureClientStarted(LocaleBreezeLspClientDescriptor(project, executable))
+        val descriptor = descriptor(project)
+        val clientsBefore = LspClientManager.getInstance(project)
+            .getClients(LocaleBreezeLspIntegrationProvider::class.java)
+            .size
+        log.info(
+            "LocaleBreeze client request: project=${project.locationHash}, " +
+                "file=${file.path}, descriptor=${System.identityHashCode(descriptor)}, " +
+                "clientsBefore=$clientsBefore",
+        )
+        clientStarter.ensureClientStarted(descriptor)
     }
 
     private fun notifyMissingExecutable(project: Project) {
@@ -44,27 +56,44 @@ class LocaleBreezeLspIntegrationProvider : LspIntegrationProvider {
     }
 
     companion object {
+        private val descriptorKey =
+            Key.create<LocaleBreezeLspClientDescriptor>("dev.localebreeze.jetbrains.lspDescriptor")
         private val notifiedProjects = ConcurrentHashMap.newKeySet<String>()
         private val supportedExtensions = setOf("js", "jsx", "ts", "tsx", "json")
 
         internal fun isSupported(file: VirtualFile): Boolean =
             file.extension?.lowercase() in supportedExtensions
+
+        private fun descriptor(project: Project): LocaleBreezeLspClientDescriptor =
+            project.getUserData(descriptorKey) ?: synchronized(project) {
+                project.getUserData(descriptorKey) ?: LocaleBreezeLspClientDescriptor(project).also {
+                    project.putUserData(descriptorKey, it)
+                }
+            }
     }
 }
 
 private class LocaleBreezeLspClientDescriptor(
     project: Project,
-    private val executable: Path,
 ) : ProjectWideLspClientDescriptor(project, "LocaleBreeze") {
+    private val log = Logger.getInstance(LocaleBreezeLspClientDescriptor::class.java)
+
     override fun isSupportedFile(file: VirtualFile): Boolean =
         LocaleBreezeLspIntegrationProvider.isSupported(file)
 
     override fun createCommandLine(): GeneralCommandLine {
+        val executable = checkNotNull(LocaleBreezeExecutable.resolve(project)) {
+            "LocaleBreeze executable disappeared before the language server started"
+        }
         val command = GeneralCommandLine(executable.toString(), "lsp", "--stdio")
         project.basePath?.let(command::withWorkDirectory)
         LocaleBreezeExecutable.resolveConfig(project)?.let {
             command.addParameters("--config", it.toString())
         }
+        log.info(
+            "Starting LocaleBreeze language server: project=${project.locationHash}, " +
+                "descriptor=${System.identityHashCode(this)}, executable=$executable",
+        )
         return command
     }
 
