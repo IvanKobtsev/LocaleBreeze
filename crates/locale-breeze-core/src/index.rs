@@ -108,6 +108,34 @@ impl IndexSnapshot {
         self.occurrences(key)
             .iter()
             .any(|occurrence| occurrence.kind != OccurrenceKind::ScopeDeclaration)
+            || self.dynamic_scope_occurrences(key, ".").next().is_some()
+    }
+
+    pub fn is_leaf_key_used_with_separator(&self, key: &CanonicalKey, separator: &str) -> bool {
+        self.occurrences(key)
+            .iter()
+            .any(|occurrence| occurrence.kind != OccurrenceKind::ScopeDeclaration)
+            || self
+                .dynamic_scope_occurrences(key, separator)
+                .next()
+                .is_some()
+    }
+
+    pub fn dynamic_scope_occurrences<'a>(
+        &'a self,
+        key: &'a CanonicalKey,
+        separator: &'a str,
+    ) -> impl Iterator<Item = &'a SourceOccurrence> + 'a {
+        self.occurrences
+            .values()
+            .flatten()
+            .filter(move |occurrence| {
+                occurrence.kind == OccurrenceKind::DynamicScope
+                    && (occurrence.key == *key
+                        || key
+                            .as_str()
+                            .starts_with(&format!("{}{}", occurrence.key, separator)))
+            })
     }
 
     pub fn occurrence_at(&self, uri: &Url, offset: usize) -> Option<&SourceOccurrence> {
@@ -127,6 +155,20 @@ impl IndexSnapshot {
 
     pub fn text(&self, uri: &Url) -> Option<&str> {
         Some(&self.file(uri)?.text)
+    }
+
+    pub fn version(&self, uri: &Url) -> Option<i32> {
+        self.file(uri)?.version
+    }
+
+    pub fn source_occurrences(&self, uri: &Url) -> &[SourceOccurrence] {
+        self.file(uri)
+            .map(|file| file.occurrences.as_slice())
+            .unwrap_or_default()
+    }
+
+    pub fn dictionary_entries_all(&self) -> impl Iterator<Item = &DictionaryEntry> {
+        self.dictionaries.values().flatten()
     }
 
     fn file(&self, uri: &Url) -> Option<&FileContribution> {
@@ -266,6 +308,11 @@ impl IndexSnapshot {
             .flatten()
             .filter(|o| {
                 o.kind == OccurrenceKind::ScopeDeclaration && &o.key == scope
+                    || o.kind == OccurrenceKind::DynamicScope
+                        && (o.key == *scope
+                            || scope
+                                .as_str()
+                                .starts_with(&format!("{}{}", o.key, separator)))
                     || if recursive {
                         o.key.as_str().starts_with(&descendant_prefix)
                     } else {
@@ -312,7 +359,18 @@ pub struct WorkspaceIndex {
 
 impl WorkspaceIndex {
     pub fn load(root: PathBuf, config_path: &Path) -> Result<Self, crate::ConfigError> {
-        let config = Config::load(config_path)?;
+        Self::load_with_unused_override(root, config_path, None)
+    }
+
+    pub fn load_with_unused_override(
+        root: PathBuf,
+        config_path: &Path,
+        unused_keys_override: Option<bool>,
+    ) -> Result<Self, crate::ConfigError> {
+        let mut config = Config::load(config_path)?;
+        if let Some(value) = unused_keys_override {
+            config.unused_keys = value;
+        }
         let this = Self {
             root,
             config,
@@ -709,6 +767,54 @@ mod tests {
         assert_eq!(occurrences.len(), 1);
         assert_eq!(occurrences[0].kind, OccurrenceKind::ScopeDeclaration);
         assert_eq!(occurrences[0].key.as_str(), "Scope.Child0");
+    }
+
+    #[test]
+    fn dynamic_scope_marks_every_descendant_used_and_referenced() {
+        let dictionary_uri = Url::parse("file:///translation.en.json").unwrap();
+        let dictionary_text = r#"{"SomeScope":{"child":{"leaf":"Value"}}}"#.to_string();
+        let dictionary = FileContribution {
+            uri: dictionary_uri.clone(),
+            dictionaries: parse_dictionary(&dictionary_uri, "en", &dictionary_text, ".").unwrap(),
+            text: dictionary_text,
+            version: None,
+            occurrences: vec![],
+            bindings: vec![],
+        };
+        let source_uri = Url::parse("file:///app.ts").unwrap();
+        let source_text = "i18next.t(`SomeScope.${value}`)".to_string();
+        let (occurrences, bindings) = analyze_source(
+            &source_uri,
+            &source_text,
+            ".",
+            &["useScopedTranslation".into()],
+            &["t".into()],
+            &["i18next.t".into()],
+            &[],
+            &[],
+        );
+        let source = FileContribution {
+            uri: source_uri,
+            text: source_text,
+            version: None,
+            dictionaries: vec![],
+            occurrences,
+            bindings,
+        };
+        let snapshot = IndexSnapshot::rebuild(
+            1,
+            HashMap::from([
+                (dictionary_uri, Arc::new(dictionary)),
+                (source.uri.clone(), Arc::new(source)),
+            ]),
+        );
+        let leaf = CanonicalKey::new("SomeScope.child.leaf", ".").unwrap();
+        assert!(snapshot.is_leaf_key_used_with_separator(&leaf, "."));
+        let references = snapshot
+            .dynamic_scope_occurrences(&leaf, ".")
+            .collect::<Vec<_>>();
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].key.as_str(), "SomeScope");
     }
 
     #[test]

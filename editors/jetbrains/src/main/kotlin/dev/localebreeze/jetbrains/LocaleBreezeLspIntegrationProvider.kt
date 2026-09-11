@@ -49,7 +49,7 @@ class LocaleBreezeLspIntegrationProvider : LspIntegrationProvider {
             .getNotificationGroup("LocaleBreeze")
             .createNotification(
                 "LocaleBreeze server not found",
-                "Configure the server executable under Settings | Tools | LocaleBreeze, or install a plugin package containing native binaries.",
+                "Reinstall LocaleBreeze to restore its bundled language-server executable.",
                 NotificationType.ERROR,
             )
             .notify(project)
@@ -90,6 +90,9 @@ private class LocaleBreezeLspClientDescriptor(
         LocaleBreezeExecutable.resolveConfig(project)?.let {
             command.addParameters("--config", it.toString())
         }
+        LocaleBreezeSettings.getInstance(project).state.takeIf { it.overrideConfig }?.let {
+            command.addParameters("--unused-keys", it.showUnusedKeys.toString())
+        }
         log.info(
             "Starting LocaleBreeze language server: project=${project.locationHash}, " +
                 "descriptor=${System.identityHashCode(this)}, executable=$executable",
@@ -108,11 +111,6 @@ private object LocaleBreezeExecutable {
     private val log = Logger.getInstance(LocaleBreezeExecutable::class.java)
 
     fun resolve(project: Project): Path? {
-        val configured = LocaleBreezeSettings.getInstance(project).state.serverPath
-        if (configured.isNotBlank()) {
-            val path = resolveProjectPath(project, configured)
-            return path.takeIf(Files::isRegularFile)
-        }
         val executable = bundledExecutable()
         if (executable == null) {
             log.warn("Could not locate the bundled LocaleBreeze executable")

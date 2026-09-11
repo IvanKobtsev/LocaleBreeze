@@ -6,6 +6,7 @@ use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::*;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -14,8 +15,13 @@ use url::Url;
 
 const RESOLVE_KEY_COMMAND: &str = "localeBreeze.resolveFullKey";
 const REFRESH_DOCUMENT_COMMAND: &str = "localeBreeze.refreshDocument";
+const DOCUMENT_KEYS_COMMAND: &str = "localeBreeze.documentKeys";
+const PREPARE_ADD_KEY_COMMAND: &str = "localeBreeze.prepareAddKey";
 
-pub fn run_stdio(config_override: Option<PathBuf>) -> Result<()> {
+pub fn run_stdio(
+    config_override: Option<PathBuf>,
+    unused_keys_override: Option<bool>,
+) -> Result<()> {
     let (connection, io_threads) = Connection::stdio();
     let capabilities = ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Options(
@@ -36,7 +42,12 @@ pub fn run_stdio(config_override: Option<PathBuf>) -> Result<()> {
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         references_provider: Some(OneOf::Left(true)),
         execute_command_provider: Some(ExecuteCommandOptions {
-            commands: vec![RESOLVE_KEY_COMMAND.into(), REFRESH_DOCUMENT_COMMAND.into()],
+            commands: vec![
+                RESOLVE_KEY_COMMAND.into(),
+                REFRESH_DOCUMENT_COMMAND.into(),
+                DOCUMENT_KEYS_COMMAND.into(),
+                PREPARE_ADD_KEY_COMMAND.into(),
+            ],
             ..Default::default()
         }),
         workspace: Some(WorkspaceServerCapabilities {
@@ -50,7 +61,7 @@ pub fn run_stdio(config_override: Option<PathBuf>) -> Result<()> {
     };
     let params: InitializeParams =
         serde_json::from_value(connection.initialize(serde_json::to_value(capabilities)?)?)?;
-    let mut server = Server::new(config_override);
+    let mut server = Server::new(config_override, unused_keys_override);
     server.initialize(&connection, &params);
     server.event_loop(&connection)?;
     io_threads.join()?;
@@ -61,15 +72,51 @@ struct Server {
     workspaces: Vec<Arc<WorkspaceIndex>>,
     watchers: Vec<RecommendedWatcher>,
     config_override: Option<PathBuf>,
+    unused_keys_override: Option<bool>,
     published_diagnostics: Arc<Mutex<HashMap<Url, Vec<Diagnostic>>>>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocumentKeyInfo {
+    range: Range,
+    key: String,
+    declaration_exists: bool,
+    can_add: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocumentKeysResult {
+    version: Option<i32>,
+    keys: Vec<DocumentKeyInfo>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrepareAddKeyParams {
+    text_document: TextDocumentIdentifier,
+    position: Position,
+    value: String,
+    version: Option<i32>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreparedEdit {
+    uri: Url,
+    version: Option<i32>,
+    range: Range,
+    new_text: String,
+}
+
 impl Server {
-    fn new(config_override: Option<PathBuf>) -> Self {
+    fn new(config_override: Option<PathBuf>, unused_keys_override: Option<bool>) -> Self {
         Self {
             workspaces: vec![],
             watchers: vec![],
             config_override,
+            unused_keys_override,
             published_diagnostics: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -96,7 +143,11 @@ impl Server {
             .config_override
             .clone()
             .unwrap_or_else(|| root.join("locale-breeze.json"));
-        match WorkspaceIndex::load(root.clone(), &config_path) {
+        match WorkspaceIndex::load_with_unused_override(
+            root.clone(),
+            &config_path,
+            self.unused_keys_override,
+        ) {
             Ok(workspace) => {
                 let workspace = Arc::new(workspace);
                 let watched = workspace.clone();
@@ -386,7 +437,13 @@ impl Server {
             let occurrences: Vec<_> = if is_scope {
                 snapshot.scope_occurrences(&key, &workspace.config().key_separator, 32)
             } else {
-                snapshot.occurrences(&key).iter().collect()
+                snapshot
+                    .occurrences(&key)
+                    .iter()
+                    .chain(
+                        snapshot.dynamic_scope_occurrences(&key, &workspace.config().key_separator),
+                    )
+                    .collect()
             };
             occurrences
                 .into_iter()
@@ -491,7 +548,11 @@ impl Server {
         let occurrences: Vec<_> = if is_scope {
             snapshot.scope_occurrences(&key, &workspace.config().key_separator, 32)
         } else {
-            snapshot.occurrences(&key).iter().collect()
+            snapshot
+                .occurrences(&key)
+                .iter()
+                .chain(snapshot.dynamic_scope_occurrences(&key, &workspace.config().key_separator))
+                .collect()
         };
         let mut locations: Vec<_> = occurrences
             .into_iter()
@@ -508,7 +569,7 @@ impl Server {
         Ok(Some(locations))
     }
 
-    fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<String>> {
+    fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<Value>> {
         match params.command.as_str() {
             RESOLVE_KEY_COMMAND => {
                 let Some(argument) = params.arguments.first() else {
@@ -527,7 +588,7 @@ impl Server {
                     position.position,
                     &workspace.config().key_separator,
                 )
-                .map(|key| key.as_str().to_owned()))
+                .map(|key| Value::String(key.as_str().to_owned())))
             }
             REFRESH_DOCUMENT_COMMAND => {
                 let Some(uri) = params.arguments.first() else {
@@ -545,8 +606,275 @@ impl Server {
                 }
                 Ok(None)
             }
+            DOCUMENT_KEYS_COMMAND => {
+                let Some(argument) = params.arguments.first() else {
+                    return Ok(None);
+                };
+                let document: TextDocumentIdentifier = serde_json::from_value(argument.clone())?;
+                let Some(workspace) = self.workspace_for_uri(&document.uri) else {
+                    return Ok(None);
+                };
+                let snapshot = workspace.snapshot();
+                let default_locale = &workspace.config().default_locale;
+                let keys = snapshot
+                    .source_occurrences(&document.uri)
+                    .iter()
+                    .filter_map(|occurrence| {
+                        let range = location(&snapshot, &occurrence.uri, &occurrence.range)?.range;
+                        let declaration_exists = snapshot
+                            .dictionary_entries(&occurrence.key)
+                            .iter()
+                            .any(|entry| entry.locale == *default_locale);
+                        let can_add = matches!(
+                            occurrence.kind,
+                            OccurrenceKind::FullKey | OccurrenceKind::ScopedKey
+                        ) && !declaration_exists
+                            && insertion_target(
+                                &snapshot,
+                                &occurrence.key,
+                                default_locale,
+                                &workspace.config().key_separator,
+                            )
+                            .is_some();
+                        Some(DocumentKeyInfo {
+                            range,
+                            key: occurrence.key.as_str().to_owned(),
+                            declaration_exists,
+                            can_add,
+                        })
+                    })
+                    .collect();
+                Ok(Some(serde_json::to_value(DocumentKeysResult {
+                    version: snapshot.version(&document.uri),
+                    keys,
+                })?))
+            }
+            PREPARE_ADD_KEY_COMMAND => {
+                let Some(argument) = params.arguments.first() else {
+                    return Ok(None);
+                };
+                let request: PrepareAddKeyParams = serde_json::from_value(argument.clone())?;
+                let Some(workspace) = self.workspace_for_uri(&request.text_document.uri) else {
+                    return Ok(None);
+                };
+                let snapshot = workspace.snapshot();
+                if request.version.is_some()
+                    && request.version != snapshot.version(&request.text_document.uri)
+                {
+                    return Ok(None);
+                }
+                let Some(offset) =
+                    position_offset(&snapshot, &request.text_document.uri, request.position)
+                else {
+                    return Ok(None);
+                };
+                let Some(occurrence) = snapshot.occurrence_at(&request.text_document.uri, offset)
+                else {
+                    return Ok(None);
+                };
+                if occurrence.kind == OccurrenceKind::DynamicScope
+                    || snapshot
+                        .dictionary_entries(&occurrence.key)
+                        .iter()
+                        .any(|entry| entry.locale == workspace.config().default_locale)
+                {
+                    return Ok(None);
+                }
+                let Some(edit) = prepare_insertion(
+                    &snapshot,
+                    &occurrence.key,
+                    &workspace.config().default_locale,
+                    &workspace.config().key_separator,
+                    &request.value,
+                ) else {
+                    return Ok(None);
+                };
+                Ok(Some(serde_json::to_value(edit)?))
+            }
             _ => Ok(None),
         }
+    }
+}
+
+fn insertion_target(
+    snapshot: &IndexSnapshot,
+    key: &CanonicalKey,
+    locale: &str,
+    separator: &str,
+) -> Option<(Url, Option<locale_breeze_core::DictionaryEntry>)> {
+    let ancestors =
+        std::iter::successors(key.parent(separator), |current| current.parent(separator))
+            .collect::<Vec<_>>();
+    if ancestors.iter().any(|ancestor| {
+        snapshot
+            .dictionary_entries(ancestor)
+            .iter()
+            .any(|entry| entry.locale == locale && entry.kind == EntryKind::Leaf)
+    }) {
+        return None;
+    }
+    let mut files = snapshot
+        .dictionary_entries_all()
+        .filter(|entry| entry.locale == locale)
+        .map(|entry| entry.uri.clone())
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    files.dedup();
+    let mut candidates = files
+        .into_iter()
+        .map(|uri| {
+            let ancestor = ancestors.iter().find_map(|ancestor| {
+                snapshot
+                    .dictionary_entries(ancestor)
+                    .iter()
+                    .find(|entry| {
+                        entry.locale == locale
+                            && entry.uri == uri
+                            && entry.kind == EntryKind::Object
+                    })
+                    .cloned()
+            });
+            let depth = ancestor
+                .as_ref()
+                .map_or(0, |entry| entry.key.as_str().matches(separator).count() + 1);
+            (std::cmp::Reverse(depth), uri, ancestor)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then(left.1.as_str().cmp(right.1.as_str()))
+    });
+    candidates
+        .into_iter()
+        .next()
+        .map(|(_, uri, ancestor)| (uri, ancestor))
+}
+
+fn prepare_insertion(
+    snapshot: &IndexSnapshot,
+    key: &CanonicalKey,
+    locale: &str,
+    separator: &str,
+    value: &str,
+) -> Option<PreparedEdit> {
+    let (uri, ancestor) = insertion_target(snapshot, key, locale, separator)?;
+    let text = snapshot.text(&uri)?;
+    let (object_start, object_end, ancestor_key) = match &ancestor {
+        Some(entry) => (
+            entry.value_range.0.start,
+            entry.value_range.0.end,
+            Some(&entry.key),
+        ),
+        None => {
+            let start = text.find('{')?;
+            let end = text.rfind('}')? + 1;
+            (start, end, None)
+        }
+    };
+    let relative = ancestor_key
+        .and_then(|ancestor| key.relative_to(ancestor, separator))
+        .unwrap_or(key.as_str());
+    let segments = relative.split(separator).collect::<Vec<_>>();
+    if segments.is_empty() {
+        return None;
+    }
+    let closing = object_end.checked_sub(1)?;
+    let inner = text.get(object_start + 1..closing)?;
+    let closing_indent = line_indent(text, closing);
+    let indent_unit = detect_indent(text).unwrap_or("  ");
+    let child_indent = format!("{closing_indent}{indent_unit}");
+    let multiline = inner.contains(['\n', '\r']);
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let property = nested_property(
+        &segments,
+        value,
+        &child_indent,
+        indent_unit,
+        newline,
+        multiline,
+    )?;
+    let (offset, new_text) = if inner.trim().is_empty() {
+        if multiline {
+            (
+                object_start + 1,
+                format!("{newline}{property}{newline}{closing_indent}"),
+            )
+        } else {
+            (closing, property.trim_start().to_owned())
+        }
+    } else if multiline {
+        let last = inner.rfind(|character: char| !character.is_whitespace())?;
+        (object_start + 1 + last + 1, format!(",{newline}{property}"))
+    } else {
+        (closing, format!(",{}", property.trim_start()))
+    };
+    let index = LineIndex::new(text);
+    let (line, character) = index.position(text, offset)?;
+    Some(PreparedEdit {
+        uri: uri.clone(),
+        version: snapshot.version(&uri),
+        range: Range::new(
+            Position::new(line, character),
+            Position::new(line, character),
+        ),
+        new_text,
+    })
+}
+
+fn line_indent(text: &str, offset: usize) -> &str {
+    let line_start = text[..offset].rfind('\n').map_or(0, |index| index + 1);
+    text[line_start..offset]
+        .split_at(
+            text[line_start..offset]
+                .find(|character: char| !character.is_whitespace())
+                .unwrap_or(offset - line_start),
+        )
+        .0
+}
+
+fn detect_indent(text: &str) -> Option<&str> {
+    text.lines()
+        .filter_map(|line| {
+            let count = line
+                .chars()
+                .take_while(|character| character.is_whitespace())
+                .count();
+            (count > 0 && count < line.len()).then_some(&line[..count])
+        })
+        .min_by_key(|indent| indent.len())
+}
+
+fn nested_property(
+    segments: &[&str],
+    value: &str,
+    indent: &str,
+    indent_unit: &str,
+    newline: &str,
+    multiline: bool,
+) -> Option<String> {
+    let name = serde_json::to_string(segments.first()?).ok()?;
+    if segments.len() == 1 {
+        return Some(format!(
+            "{indent}{name}: {}",
+            serde_json::to_string(value).ok()?
+        ));
+    }
+    let next_indent = format!("{indent}{indent_unit}");
+    let child = nested_property(
+        &segments[1..],
+        value,
+        &next_indent,
+        indent_unit,
+        newline,
+        multiline,
+    )?;
+    if multiline {
+        Some(format!(
+            "{indent}{name}: {{{newline}{child}{newline}{indent}}}"
+        ))
+    } else {
+        Some(format!("{indent}{name}: {{{}}}", child.trim_start()))
     }
 }
 
@@ -667,7 +995,8 @@ fn diagnostic_notifications(
     for entry in snapshot.default_locale_leaf_entries(&workspace.config().default_locale) {
         let diagnostics = by_uri.entry(entry.uri.clone()).or_default();
         if workspace.config().unused_keys
-            && !snapshot.is_leaf_key_used(&entry.key)
+            && !snapshot
+                .is_leaf_key_used_with_separator(&entry.key, &workspace.config().key_separator)
             && let Some(range) = location(&snapshot, &entry.uri, &entry.key_range).map(|l| l.range)
         {
             diagnostics.push(Diagnostic {
@@ -937,6 +1266,7 @@ mod tests {
             workspaces: vec![workspace.clone()],
             watchers: vec![],
             config_override: None,
+            unused_keys_override: None,
             published_diagnostics: Default::default(),
         };
         let hover_at = |line, character| {
@@ -1038,6 +1368,7 @@ mod tests {
             workspaces: vec![Arc::new(workspace)],
             watchers: vec![],
             config_override: None,
+            unused_keys_override: None,
             published_diagnostics: Default::default(),
         };
         let result = server
@@ -1053,6 +1384,101 @@ mod tests {
                 work_done_progress_params: Default::default(),
             })
             .unwrap();
-        assert_eq!(result.as_deref(), Some("Page/Login/submit"));
+        assert_eq!(result, Some(Value::String("Page/Login/submit".into())));
+    }
+
+    #[test]
+    fn unused_key_override_takes_precedence_only_when_supplied() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("locale-breeze.json");
+        std::fs::write(
+            &config_path,
+            r#"{
+              "dictionaries":"translation.{locale}.json",
+              "defaultLocale":"en",
+              "scopedFunctions":["useScopedTranslation"],
+              "translationMethods":["t"],
+              "fullKeyFunctions":["i18next.t"],
+              "unusedKeys":false
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("translation.en.json"),
+            r#"{"unused":"Value"}"#,
+        )
+        .unwrap();
+        let configured = WorkspaceIndex::load(temp.path().to_owned(), &config_path).unwrap();
+        assert!(!configured.config().unused_keys);
+        let overridden = WorkspaceIndex::load_with_unused_override(
+            temp.path().to_owned(),
+            &config_path,
+            Some(true),
+        )
+        .unwrap();
+        assert!(overridden.config().unused_keys);
+    }
+
+    #[test]
+    fn prepares_a_format_preserving_nested_translation_edit() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("locale-breeze.json"),
+            r#"{
+              "dictionaries":"translation.{locale}.json",
+              "defaultLocale":"en",
+              "scopedFunctions":["useScopedTranslation"],
+              "translationMethods":["t"],
+              "fullKeyFunctions":["i18next.t"]
+            }"#,
+        )
+        .unwrap();
+        let dictionary_path = temp.path().join("translation.en.json");
+        std::fs::write(
+            &dictionary_path,
+            "{\r\n  \"Page\": {\r\n    \"old\": \"Old\"\r\n  }\r\n}\r\n",
+        )
+        .unwrap();
+        let workspace = WorkspaceIndex::load(
+            temp.path().to_owned(),
+            &temp.path().join("locale-breeze.json"),
+        )
+        .unwrap();
+        let snapshot = workspace.snapshot();
+        let key = CanonicalKey::new("Page.Card.title", ".").unwrap();
+        let edit = prepare_insertion(&snapshot, &key, "en", ".", "Hello").unwrap();
+        assert_eq!(edit.uri, Url::from_file_path(dictionary_path).unwrap());
+        assert_eq!(
+            edit.new_text,
+            ",\r\n    \"Card\": {\r\n      \"title\": \"Hello\"\r\n    }"
+        );
+    }
+
+    #[test]
+    fn refuses_to_replace_a_leaf_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("locale-breeze.json"),
+            r#"{
+              "dictionaries":"translation.{locale}.json",
+              "defaultLocale":"en",
+              "scopedFunctions":["useScopedTranslation"],
+              "translationMethods":["t"],
+              "fullKeyFunctions":["i18next.t"]
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("translation.en.json"),
+            r#"{"Page":"Blocked"}"#,
+        )
+        .unwrap();
+        let workspace = WorkspaceIndex::load(
+            temp.path().to_owned(),
+            &temp.path().join("locale-breeze.json"),
+        )
+        .unwrap();
+        let key = CanonicalKey::new("Page.title", ".").unwrap();
+        assert!(prepare_insertion(&workspace.snapshot(), &key, "en", ".", "Title").is_none());
     }
 }

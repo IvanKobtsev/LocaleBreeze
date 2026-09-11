@@ -7,6 +7,7 @@ pub enum OccurrenceKind {
     FullKey,
     ScopedKey,
     ScopeDeclaration,
+    DynamicScope,
 }
 
 #[derive(Clone, Debug)]
@@ -175,8 +176,9 @@ fn collect_calls(
     out: &mut Vec<SourceOccurrence>,
 ) {
     if node.kind() == "call_expression" {
-        if let Some((callee, literal)) = call_with_literal(node, text) {
-            if let Some(value) = literal_value(literal, text) {
+        if let Some((callee, argument)) = call_with_first_argument(node, text) {
+            if let Some(value) = literal_value(argument, text) {
+                let literal = argument;
                 let range = content_range(literal);
                 if scoped_functions.iter().any(|x| x == &callee) {
                     if let Some(key) = CanonicalKey::new(value, separator) {
@@ -213,6 +215,26 @@ fn collect_calls(
                         });
                     }
                 }
+            } else if let Some((prefix, range)) = dynamic_template_prefix(argument, text, separator)
+            {
+                let key = if full_key_functions.iter().any(|x| x == &callee) {
+                    CanonicalKey::new(prefix, separator)
+                } else if let Some(binding) = resolve_binding(&callee, node.start_byte(), bindings)
+                {
+                    CanonicalKey::join(&binding.scope, &prefix, separator)
+                } else {
+                    None
+                };
+                if let Some(key) = key {
+                    out.push(SourceOccurrence {
+                        uri: uri.clone(),
+                        range,
+                        key,
+                        kind: OccurrenceKind::DynamicScope,
+                        scope: None,
+                        relative_key: None,
+                    });
+                }
             }
         }
     }
@@ -229,6 +251,40 @@ fn collect_calls(
             out,
         );
     }
+}
+
+fn call_with_first_argument<'a>(node: Node<'a>, text: &str) -> Option<(String, Node<'a>)> {
+    if node.kind() != "call_expression" {
+        return None;
+    }
+    let function = node.child_by_field_name("function")?;
+    let callee = function.utf8_text(text.as_bytes()).ok()?.to_owned();
+    let args = node.child_by_field_name("arguments")?;
+    let mut cursor = args.walk();
+    Some((callee, args.named_children(&mut cursor).next()?))
+}
+
+fn dynamic_template_prefix(
+    node: Node<'_>,
+    text: &str,
+    separator: &str,
+) -> Option<(String, ByteRange)> {
+    if node.kind() != "template_string" {
+        return None;
+    }
+    let mut cursor = node.walk();
+    let mut children = node.named_children(&mut cursor);
+    let fragment = children.next()?;
+    if fragment.kind() != "string_fragment" || children.next()?.kind() != "template_substitution" {
+        return None;
+    }
+    let raw = fragment.utf8_text(text.as_bytes()).ok()?;
+    let prefix = raw.strip_suffix(separator)?;
+    CanonicalKey::new(prefix, separator)?;
+    Some((
+        prefix.to_owned(),
+        ByteRange(fragment.start_byte()..fragment.end_byte().saturating_sub(separator.len())),
+    ))
 }
 
 fn resolve_binding<'a>(
@@ -355,14 +411,7 @@ fn property_name<'a>(node: Node<'a>, text: &'a str) -> Option<&'a str> {
 }
 
 fn call_with_literal<'a>(node: Node<'a>, text: &str) -> Option<(String, Node<'a>)> {
-    if node.kind() != "call_expression" {
-        return None;
-    }
-    let function = node.child_by_field_name("function")?;
-    let callee = function.utf8_text(text.as_bytes()).ok()?.to_owned();
-    let args = node.child_by_field_name("arguments")?;
-    let mut cursor = args.walk();
-    let literal = args.named_children(&mut cursor).next()?;
+    let (callee, literal) = call_with_first_argument(node, text)?;
     matches!(literal.kind(), "string" | "string_fragment").then_some((callee, literal))
 }
 
@@ -455,6 +504,29 @@ mod tests {
             &[],
         );
         assert!(found.is_empty());
+    }
+
+    #[test]
+    fn recognizes_dynamic_template_scopes() {
+        let uri = Url::parse("file:///app.ts").unwrap();
+        let text = "const i18n=useScopedTranslation('Page'); i18n.t(`Cards.${card}`); i18next.t(`SomeScope.${value}.ignored`)";
+        let (found, _) = analyze_source(
+            &uri,
+            text,
+            ".",
+            &["useScopedTranslation".into()],
+            &["t".into()],
+            &["i18next.t".into()],
+            &[],
+            &[],
+        );
+        let dynamic = found
+            .iter()
+            .filter(|occurrence| occurrence.kind == OccurrenceKind::DynamicScope)
+            .map(|occurrence| occurrence.key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(dynamic, ["Page.Cards", "SomeScope"]);
+        assert_eq!(&text[found[1].range.0.clone()], "Cards");
     }
 
     #[test]

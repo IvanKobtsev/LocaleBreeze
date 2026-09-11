@@ -17,6 +17,11 @@
         implementation="dev.localebreeze.jetbrains.LocaleBreezeGotoDeclarationHandler"
         order="first"/>
     <postStartupActivity implementation="dev.localebreeze.jetbrains.LocaleBreezeProjectActivity"/>
+    <annotator language="JavaScript" implementationClass="dev.localebreeze.jetbrains.LocaleBreezeKeyAnnotator"/>
+    <annotator language="JavaScript JSX" implementationClass="dev.localebreeze.jetbrains.LocaleBreezeKeyAnnotator"/>
+    <annotator language="TypeScript" implementationClass="dev.localebreeze.jetbrains.LocaleBreezeKeyAnnotator"/>
+    <annotator language="TypeScript JSX" implementationClass="dev.localebreeze.jetbrains.LocaleBreezeKeyAnnotator"/>
+    <colorSettingsPage implementation="dev.localebreeze.jetbrains.LocaleBreezeColorSettingsPage"/>
     <projectConfigurable
         id="dev.localebreeze.jetbrains.settings"
         displayName="LocaleBreeze"
@@ -30,6 +35,13 @@
         class="dev.localebreeze.jetbrains.LocaleBreezeCopyFullKeyAction"
         text="Copy Full Translation Key"
         description="Copy the full LocaleBreeze translation key path">
+      <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+    </action>
+    <action
+        id="dev.localebreeze.jetbrains.AddTranslationKey"
+        class="dev.localebreeze.jetbrains.LocaleBreezeAddKeyAction"
+        text="Add Translation Key…"
+        description="Add the missing key to the default-locale translation file">
       <add-to-group group-id="EditorPopupMenu" anchor="last"/>
     </action>
   </actions>

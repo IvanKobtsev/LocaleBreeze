@@ -4,7 +4,7 @@ This is a thin WebStorm launcher for the LocaleBreeze Rust language server. The 
 
 ## Development
 
-Install a JDK 25 and run `gradlew runIde`. In the development WebStorm instance, open **Settings | Tools | LocaleBreeze** and select a locally built `locale-breeze` executable. The configuration path is optional; when empty, the server reads `locale-breeze.json` from the project root.
+Install a JDK 25 and run `gradlew runIde`. The plugin uses its bundled LocaleBreeze executable. In the development WebStorm instance, open **Settings | Tools | LocaleBreeze** to choose an optional workspace-specific configuration path and, when needed, override the configuration file's unused-key behavior.
 
 ## Native binaries
 
@@ -20,6 +20,6 @@ dist/jetbrains/
   linux-arm64/locale-breeze
 ```
 
-The Gradle build copies that tree into the plugin's `bin/` directory. A configured server path overrides the bundled executable.
+The Gradle build copies that tree into the plugin's `bin/` directory.
 
 From the repository root, run `node scripts/package-editors.mjs`. It validates all native binaries, creates six platform-specific VSIX files, bundles every binary into the JetBrains ZIP, and verifies the JetBrains archive structure. Artifacts are written to `dist/editors/`.
