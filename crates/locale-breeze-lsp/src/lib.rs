@@ -619,6 +619,7 @@ impl Server {
                 let keys = snapshot
                     .source_occurrences(&document.uri)
                     .iter()
+                    .filter(|occurrence| !occurrence.range.0.is_empty())
                     .filter_map(|occurrence| {
                         let range = location(&snapshot, &occurrence.uri, &occurrence.range)?.range;
                         let declaration_exists = snapshot
@@ -1480,5 +1481,39 @@ mod tests {
         .unwrap();
         let key = CanonicalKey::new("Page.title", ".").unwrap();
         assert!(prepare_insertion(&workspace.snapshot(), &key, "en", ".", "Title").is_none());
+    }
+
+    #[test]
+    fn scoped_interpolation_resolves_the_static_relative_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("locale-breeze.json"),
+            r#"{
+              "dictionaries":"translation.{locale}.json",
+              "defaultLocale":"en",
+              "scopedFunctions":["useScopedTranslation"],
+              "translationMethods":["t"],
+              "fullKeyFunctions":["i18next.t"]
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("translation.en.json"),
+            r#"{"Page":{"Steps":{"FieldNames":{"action":"Action"}}}}"#,
+        )
+        .unwrap();
+        let source_path = temp.path().join("StepsComparer.tsx");
+        let source = "const i18n=useScopedTranslation('Page.Steps'); i18n.t(`FieldNames.${key}`)";
+        std::fs::write(&source_path, source).unwrap();
+        let workspace = WorkspaceIndex::load(
+            temp.path().to_owned(),
+            &temp.path().join("locale-breeze.json"),
+        )
+        .unwrap();
+        let snapshot = workspace.snapshot();
+        let uri = Url::from_file_path(source_path).unwrap();
+        let character = source.find("FieldNames").unwrap() as u32 + 2;
+        let resolved = key_at_position(&snapshot, &uri, Position::new(0, character), ".").unwrap();
+        assert_eq!(resolved.as_str(), "Page.Steps.FieldNames");
     }
 }

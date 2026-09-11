@@ -217,13 +217,18 @@ fn collect_calls(
                 }
             } else if let Some((prefix, range)) = dynamic_template_prefix(argument, text, separator)
             {
-                let key = if full_key_functions.iter().any(|x| x == &callee) {
-                    CanonicalKey::new(prefix, separator)
+                let (key, scope, relative_key) = if full_key_functions.iter().any(|x| x == &callee)
+                {
+                    (CanonicalKey::new(&prefix, separator), None, None)
                 } else if let Some(binding) = resolve_binding(&callee, node.start_byte(), bindings)
                 {
-                    CanonicalKey::join(&binding.scope, &prefix, separator)
+                    (
+                        CanonicalKey::join(&binding.scope, &prefix, separator),
+                        Some(binding.scope.clone()),
+                        Some(prefix.clone()),
+                    )
                 } else {
-                    None
+                    (None, None, None)
                 };
                 if let Some(key) = key {
                     out.push(SourceOccurrence {
@@ -231,10 +236,21 @@ fn collect_calls(
                         range,
                         key,
                         kind: OccurrenceKind::DynamicScope,
-                        scope: None,
-                        relative_key: None,
+                        scope,
+                        relative_key,
                     });
                 }
+            } else if argument.kind() != "template_string"
+                && let Some(binding) = resolve_binding(&callee, node.start_byte(), bindings)
+            {
+                out.push(SourceOccurrence {
+                    uri: uri.clone(),
+                    range: ByteRange(argument.start_byte()..argument.start_byte()),
+                    key: binding.scope.clone(),
+                    kind: OccurrenceKind::DynamicScope,
+                    scope: None,
+                    relative_key: None,
+                });
             }
         }
     }
@@ -527,6 +543,30 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(dynamic, ["Page.Cards", "SomeScope"]);
         assert_eq!(&text[found[1].range.0.clone()], "Cards");
+        assert_eq!(found[1].scope.as_ref().unwrap().as_str(), "Page");
+        assert_eq!(found[1].relative_key.as_deref(), Some("Cards"));
+    }
+
+    #[test]
+    fn non_literal_scoped_calls_mark_the_binding_scope_dynamic() {
+        let uri = Url::parse("file:///app.ts").unwrap();
+        let text = "const i18n=useScopedTranslation('AiCaseStatuses'); i18n.t(testCase.status)";
+        let (found, _) = analyze_source(
+            &uri,
+            text,
+            ".",
+            &["useScopedTranslation".into()],
+            &["t".into()],
+            &["i18next.t".into()],
+            &[],
+            &[],
+        );
+        let dynamic = found
+            .iter()
+            .find(|occurrence| occurrence.kind == OccurrenceKind::DynamicScope)
+            .unwrap();
+        assert_eq!(dynamic.key.as_str(), "AiCaseStatuses");
+        assert!(dynamic.range.0.is_empty());
     }
 
     #[test]
