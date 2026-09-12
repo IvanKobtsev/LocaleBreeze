@@ -33,6 +33,16 @@ pub fn parse_dictionary(
     text: &str,
     separator: &str,
 ) -> Result<Vec<DictionaryEntry>, DictionaryError> {
+    parse_dictionary_ignoring(uri, locale, text, separator, &|_| false)
+}
+
+pub fn parse_dictionary_ignoring(
+    uri: &Url,
+    locale: &str,
+    text: &str,
+    separator: &str,
+    is_ignored: &dyn Fn(&CanonicalKey) -> bool,
+) -> Result<Vec<DictionaryEntry>, DictionaryError> {
     let _: serde_json::Value = serde_json::from_str(text)?;
     let mut parser = Parser::new();
     parser
@@ -50,10 +60,12 @@ pub fn parse_dictionary(
         value,
         &mut Vec::new(),
         &mut entries,
+        is_ignored,
     );
     Ok(entries)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn visit_value(
     uri: &Url,
     locale: &str,
@@ -62,6 +74,7 @@ fn visit_value(
     node: Node<'_>,
     path: &mut Vec<String>,
     out: &mut Vec<DictionaryEntry>,
+    is_ignored: &dyn Fn(&CanonicalKey) -> bool,
 ) {
     if node.kind() != "object" {
         return;
@@ -86,6 +99,10 @@ fn visit_value(
         path.push(segment);
         let joined = path.join(separator);
         if let Some(key) = CanonicalKey::new(joined, separator) {
+            if is_ignored(&key) {
+                path.pop();
+                continue;
+            }
             let key_range = string_content_range(key_node);
             let kind = if value_node.kind() == "object" {
                 EntryKind::Object
@@ -112,7 +129,9 @@ fn visit_value(
                 });
             }
         }
-        visit_value(uri, locale, text, separator, value_node, path, out);
+        visit_value(
+            uri, locale, text, separator, value_node, path, out, is_ignored,
+        );
         path.pop();
     }
 }
@@ -135,5 +154,28 @@ mod tests {
         assert_eq!(leaf.key.as_str(), "Page.Login.submit");
         assert_eq!(&text[leaf.key_range.0.clone()], "submit");
         assert_eq!(leaf.value.as_deref(), Some("Sign in"));
+    }
+
+    #[test]
+    fn prunes_ignored_dictionary_subtrees() {
+        let text = r#"{"Page":{"title":"Title"},"Server_Errors":{"nested":{"code":"Error"}},"Server_ErrorsExtra":{"value":"Kept"}}"#;
+        let uri = Url::parse("file:///translation.en.json").unwrap();
+        let entries = parse_dictionary_ignoring(&uri, "en", text, ".", &|key| {
+            key.as_str() == "Server_Errors" || key.as_str().starts_with("Server_Errors.")
+        })
+        .unwrap();
+        let keys = entries
+            .iter()
+            .map(|entry| entry.key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            [
+                "Page",
+                "Page.title",
+                "Server_ErrorsExtra",
+                "Server_ErrorsExtra.value"
+            ]
+        );
     }
 }

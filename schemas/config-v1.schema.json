@@ -15,7 +15,13 @@
     "fullKeyFunctions": { "$ref": "#/$defs/conventions" },
     "translationKeyTypes": { "$ref": "#/$defs/optionalConventions" },
     "translationKeyProps": { "$ref": "#/$defs/optionalConventions" },
-    "unusedKeys": { "type": "boolean", "default": false }
+    "unusedKeys": { "type": "boolean", "default": false },
+    "ignoredScopes": {
+      "type": "array",
+      "default": [],
+      "description": "Exact translation scopes and their descendants to exclude from frontend features.",
+      "items": { "type": "string", "minLength": 1 }
+    }
   },
   "$defs": {
     "conventions": {

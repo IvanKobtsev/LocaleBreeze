@@ -1,10 +1,10 @@
 use crate::{
     CanonicalKey, Config, DictionaryEntry, EntryKind, FileContribution, OccurrenceKind,
-    SourceOccurrence, analyze_source, parse_dictionary,
+    SourceOccurrence, analyze_source, parse_dictionary_ignoring,
 };
 use arc_swap::ArcSwap;
 use ignore::WalkBuilder;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use url::Url;
@@ -165,6 +165,12 @@ impl IndexSnapshot {
         self.file(uri)
             .map(|file| file.occurrences.as_slice())
             .unwrap_or_default()
+    }
+
+    pub fn ignored_occurrences(&self) -> impl Iterator<Item = &SourceOccurrence> {
+        self.files
+            .values()
+            .flat_map(|file| file.ignored_occurrences.iter())
     }
 
     pub fn dictionary_entries_all(&self) -> impl Iterator<Item = &DictionaryEntry> {
@@ -354,6 +360,7 @@ fn match_score(query: &str, haystack: &str, insert: &str) -> Option<i64> {
 pub struct WorkspaceIndex {
     root: PathBuf,
     config: Config,
+    ignored_scopes: HashSet<String>,
     snapshot: ArcSwap<IndexSnapshot>,
 }
 
@@ -371,18 +378,22 @@ impl WorkspaceIndex {
         if let Some(value) = unused_keys_override {
             config.unused_keys = value;
         }
+        let ignored_scopes = config.ignored_scope_set();
         let this = Self {
             root,
             config,
+            ignored_scopes,
             snapshot: ArcSwap::from_pointee(IndexSnapshot::default()),
         };
         this.rescan();
+        let dictionary_pattern = this.config.dictionary_pattern()?;
         if !this
             .snapshot()
-            .dictionaries
+            .files
             .values()
-            .flatten()
-            .any(|entry| entry.locale == this.config.default_locale)
+            .filter_map(|file| file.uri.to_file_path().ok())
+            .filter_map(|path| dictionary_pattern.locale_for(&this.root, &path))
+            .any(|locale| locale == this.config.default_locale)
         {
             return Err(crate::ConfigError::MissingDefaultLocale(
                 this.config.default_locale.clone(),
@@ -396,6 +407,13 @@ impl WorkspaceIndex {
     }
     pub fn config(&self) -> &Config {
         &self.config
+    }
+    pub fn is_ignored_key(&self, key: &CanonicalKey) -> bool {
+        is_ignored_key(
+            &self.ignored_scopes,
+            key.as_str(),
+            &self.config.key_separator,
+        )
     }
     pub fn snapshot(&self) -> Arc<IndexSnapshot> {
         self.snapshot.load_full()
@@ -456,6 +474,7 @@ impl WorkspaceIndex {
                     version,
                     dictionaries: vec![],
                     occurrences: vec![],
+                    ignored_occurrences: vec![],
                     bindings: vec![],
                 }),
             );
@@ -511,14 +530,21 @@ impl WorkspaceIndex {
         let text = std::fs::read_to_string(path).ok()?;
         let uri = Url::from_file_path(path).ok()?;
         if let Some(locale) = pattern.locale_for(&self.root, path) {
-            let dictionaries =
-                parse_dictionary(&uri, &locale, &text, &self.config.key_separator).ok()?;
+            let dictionaries = parse_dictionary_ignoring(
+                &uri,
+                &locale,
+                &text,
+                &self.config.key_separator,
+                &|key| self.is_ignored_key(key),
+            )
+            .ok()?;
             Some(FileContribution {
                 uri,
                 text,
                 version: None,
                 dictionaries,
                 occurrences: vec![],
+                ignored_occurrences: vec![],
                 bindings: vec![],
             })
         } else if is_source(path) {
@@ -532,18 +558,25 @@ impl WorkspaceIndex {
         let path = uri.to_file_path().ok()?;
         let pattern = self.config.dictionary_pattern().ok()?;
         if let Some(locale) = pattern.locale_for(&self.root, &path) {
-            let dictionaries =
-                parse_dictionary(&uri, &locale, &text, &self.config.key_separator).ok()?;
+            let dictionaries = parse_dictionary_ignoring(
+                &uri,
+                &locale,
+                &text,
+                &self.config.key_separator,
+                &|key| self.is_ignored_key(key),
+            )
+            .ok()?;
             Some(FileContribution {
                 uri,
                 text,
                 version,
                 dictionaries,
                 occurrences: vec![],
+                ignored_occurrences: vec![],
                 bindings: vec![],
             })
         } else if is_source(&path) {
-            let (occurrences, bindings) = analyze_source(
+            let (analyzed_occurrences, bindings) = analyze_source(
                 &uri,
                 &text,
                 &self.config.key_separator,
@@ -553,18 +586,41 @@ impl WorkspaceIndex {
                 &self.config.translation_key_types,
                 &self.config.translation_key_props,
             );
+            let mut occurrences = Vec::new();
+            let mut ignored_occurrences = Vec::new();
+            for occurrence in analyzed_occurrences {
+                if !self.is_ignored_key(&occurrence.key) {
+                    occurrences.push(occurrence);
+                } else if !occurrence.range.0.is_empty()
+                    && (occurrence.kind == OccurrenceKind::ScopeDeclaration
+                        || occurrence
+                            .scope
+                            .as_ref()
+                            .is_none_or(|scope| !self.is_ignored_key(scope)))
+                {
+                    ignored_occurrences.push(occurrence);
+                }
+            }
             Some(FileContribution {
                 uri,
                 text,
                 version,
                 dictionaries: vec![],
                 occurrences,
+                ignored_occurrences,
                 bindings,
             })
         } else {
             None
         }
     }
+}
+
+fn is_ignored_key(ignored_scopes: &HashSet<String>, key: &str, separator: &str) -> bool {
+    ignored_scopes.contains(key)
+        || key
+            .match_indices(separator)
+            .any(|(index, _)| ignored_scopes.contains(&key[..index]))
 }
 
 fn normalized_uri(uri: &Url) -> Url {
@@ -597,6 +653,69 @@ fn is_source(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parse_dictionary;
+
+    #[test]
+    fn ignored_scope_matching_is_exact_and_separator_aware() {
+        let ignored = HashSet::from(["Server_Errors".to_owned(), "Backend//Validation".to_owned()]);
+        assert!(is_ignored_key(&ignored, "Server_Errors", "."));
+        assert!(is_ignored_key(&ignored, "Server_Errors.InvalidToken", "."));
+        assert!(!is_ignored_key(
+            &ignored,
+            "Server_ErrorsExtra.InvalidToken",
+            "."
+        ));
+        assert!(is_ignored_key(
+            &ignored,
+            "Backend//Validation//Required",
+            "//"
+        ));
+        assert!(!is_ignored_key(&ignored, "Backend//Validator", "//"));
+    }
+
+    #[test]
+    fn workspace_partitions_ignored_keys_out_of_normal_indexes() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("locale-breeze.json"),
+            r#"{
+              "dictionaries":"translation.{locale}.json",
+              "defaultLocale":"en",
+              "scopedFunctions":["useScopedTranslation"],
+              "translationMethods":["t"],
+              "fullKeyFunctions":["i18next.t"],
+              "ignoredScopes":["Server_Errors"]
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("translation.en.json"),
+            r#"{"Page":{"title":"Title"},"Server_Errors":{"Invalid":"Invalid"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("app.ts"),
+            concat!(
+                "i18next.t('Page.title');",
+                "i18next.t('Server_Errors.Invalid');",
+                "const i18n=useScopedTranslation('Server_Errors');",
+                "i18n.t('Invalid');"
+            ),
+        )
+        .unwrap();
+        let workspace = WorkspaceIndex::load(
+            temp.path().to_owned(),
+            &temp.path().join("locale-breeze.json"),
+        )
+        .unwrap();
+        let snapshot = workspace.snapshot();
+        let ignored_key = CanonicalKey::new("Server_Errors.Invalid", ".").unwrap();
+        let normal_key = CanonicalKey::new("Page.title", ".").unwrap();
+        assert!(snapshot.dictionary_entries(&ignored_key).is_empty());
+        assert!(snapshot.occurrences(&ignored_key).is_empty());
+        assert_eq!(snapshot.occurrences(&normal_key).len(), 1);
+        assert_eq!(snapshot.ignored_occurrences().count(), 2);
+    }
     #[cfg(windows)]
     #[test]
     fn file_lookup_ignores_windows_uri_casing() {
@@ -608,6 +727,7 @@ mod tests {
             version: None,
             dictionaries: vec![],
             occurrences: vec![],
+            ignored_occurrences: vec![],
             bindings: vec![],
         };
         let snapshot = IndexSnapshot::rebuild(
@@ -629,6 +749,7 @@ mod tests {
             version: None,
             dictionaries,
             occurrences: vec![],
+            ignored_occurrences: vec![],
             bindings: vec![],
         };
         let snapshot = IndexSnapshot::rebuild(1, HashMap::from([(uri, Arc::new(contribution))]));
@@ -667,6 +788,7 @@ mod tests {
             version: None,
             dictionaries,
             occurrences: vec![],
+            ignored_occurrences: vec![],
             bindings: vec![],
         };
 
@@ -688,6 +810,7 @@ mod tests {
             version: None,
             dictionaries: vec![],
             occurrences,
+            ignored_occurrences: vec![],
             bindings,
         };
         let snapshot = IndexSnapshot::rebuild(
@@ -722,6 +845,7 @@ mod tests {
                 version: None,
                 dictionaries,
                 occurrences: vec![],
+                ignored_occurrences: vec![],
                 bindings: vec![],
             };
 
@@ -747,6 +871,7 @@ mod tests {
                 version: None,
                 dictionaries: vec![],
                 occurrences,
+                ignored_occurrences: vec![],
                 bindings,
             };
             IndexSnapshot::rebuild(
@@ -779,6 +904,7 @@ mod tests {
             text: dictionary_text,
             version: None,
             occurrences: vec![],
+            ignored_occurrences: vec![],
             bindings: vec![],
         };
         let source_uri = Url::parse("file:///app.ts").unwrap();
@@ -799,6 +925,7 @@ mod tests {
             version: None,
             dictionaries: vec![],
             occurrences,
+            ignored_occurrences: vec![],
             bindings,
         };
         let snapshot = IndexSnapshot::rebuild(
@@ -837,6 +964,7 @@ mod tests {
             version: None,
             dictionaries: vec![],
             occurrences,
+            ignored_occurrences: vec![],
             bindings,
         };
         let snapshot =

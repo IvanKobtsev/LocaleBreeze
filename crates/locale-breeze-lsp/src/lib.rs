@@ -993,24 +993,66 @@ fn diagnostic_notifications(
 ) -> Vec<Notification> {
     let snapshot = workspace.snapshot();
     let mut by_uri: HashMap<Url, Vec<Diagnostic>> = HashMap::new();
+    let mut ignored_seen = HashSet::new();
+    for occurrence in snapshot.ignored_occurrences().filter(|occurrence| {
+        !occurrence.range.0.is_empty()
+            && (occurrence.kind == OccurrenceKind::ScopeDeclaration
+                || occurrence
+                    .scope
+                    .as_ref()
+                    .is_none_or(|scope| !workspace.is_ignored_key(scope)))
+    }) {
+        let identity = (
+            occurrence.uri.clone(),
+            occurrence.range.0.start,
+            occurrence.range.0.end,
+            occurrence.key.clone(),
+        );
+        if !ignored_seen.insert(identity) {
+            continue;
+        }
+        if let Some(range) =
+            location(&snapshot, &occurrence.uri, &occurrence.range).map(|l| l.range)
+        {
+            by_uri
+                .entry(occurrence.uri.clone())
+                .or_default()
+                .push(Diagnostic {
+                    range,
+                    severity: Some(DiagnosticSeverity::WARNING),
+                    code: None,
+                    code_description: None,
+                    source: Some("locale-breeze".into()),
+                    message: format!(
+                        "Translation key \"{}\" belongs to an ignored scope",
+                        occurrence.key
+                    ),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+        }
+    }
     for entry in snapshot.default_locale_leaf_entries(&workspace.config().default_locale) {
-        let diagnostics = by_uri.entry(entry.uri.clone()).or_default();
         if workspace.config().unused_keys
             && !snapshot
                 .is_leaf_key_used_with_separator(&entry.key, &workspace.config().key_separator)
             && let Some(range) = location(&snapshot, &entry.uri, &entry.key_range).map(|l| l.range)
         {
-            diagnostics.push(Diagnostic {
-                range,
-                severity: Some(DiagnosticSeverity::WARNING),
-                code: None,
-                code_description: None,
-                source: Some("locale-breeze".into()),
-                message: format!("Translation key \"{}\" seems unused", entry.key),
-                related_information: None,
-                tags: Some(vec![DiagnosticTag::UNNECESSARY]),
-                data: None,
-            });
+            by_uri
+                .entry(entry.uri.clone())
+                .or_default()
+                .push(Diagnostic {
+                    range,
+                    severity: Some(DiagnosticSeverity::WARNING),
+                    code: None,
+                    code_description: None,
+                    source: Some("locale-breeze".into()),
+                    message: format!("Translation key \"{}\" seems unused", entry.key),
+                    related_information: None,
+                    tags: Some(vec![DiagnosticTag::UNNECESSARY]),
+                    data: None,
+                });
         }
     }
     let mut cache = published
@@ -1515,5 +1557,83 @@ mod tests {
         let character = source.find("FieldNames").unwrap() as u32 + 2;
         let resolved = key_at_position(&snapshot, &uri, Position::new(0, character), ".").unwrap();
         assert_eq!(resolved.as_str(), "Page.Steps.FieldNames");
+    }
+
+    #[test]
+    fn ignored_scope_usages_warn_without_entering_normal_features() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("locale-breeze.json"),
+            r#"{
+              "dictionaries":"translation.{locale}.json",
+              "defaultLocale":"en",
+              "scopedFunctions":["useScopedTranslation"],
+              "translationMethods":["t"],
+              "fullKeyFunctions":["i18next.t"],
+              "unusedKeys":false,
+              "ignoredScopes":["Server_Errors"]
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("translation.en.json"),
+            r#"{"Page":{"unused":"Unused"},"Server_Errors":{"Invalid":"Invalid"}}"#,
+        )
+        .unwrap();
+        let source_path = temp.path().join("app.ts");
+        let source = concat!(
+            "i18next.t('Server_Errors.Invalid');\n",
+            "const i18n=useScopedTranslation('Server_Errors');\n",
+            "i18n.t('Invalid');"
+        );
+        std::fs::write(&source_path, source).unwrap();
+        let workspace = Arc::new(
+            WorkspaceIndex::load(
+                temp.path().to_owned(),
+                &temp.path().join("locale-breeze.json"),
+            )
+            .unwrap(),
+        );
+        let published = Mutex::new(HashMap::new());
+        let notifications = diagnostic_notifications(&workspace, &published);
+        assert_eq!(notifications.len(), 1);
+        let params: PublishDiagnosticsParams =
+            serde_json::from_value(notifications[0].params.clone()).unwrap();
+        assert_eq!(params.diagnostics.len(), 2);
+        assert!(params.diagnostics.iter().all(|diagnostic| {
+            diagnostic.message.contains("belongs to an ignored scope")
+                && diagnostic.severity == Some(DiagnosticSeverity::WARNING)
+        }));
+
+        let uri = Url::from_file_path(source_path).unwrap();
+        let server = Server {
+            workspaces: vec![workspace],
+            watchers: vec![],
+            config_override: None,
+            unused_keys_override: None,
+            published_diagnostics: Default::default(),
+        };
+        let position = Position::new(0, source.find("Server_Errors").unwrap() as u32 + 2);
+        let text_position =
+            TextDocumentPositionParams::new(TextDocumentIdentifier::new(uri.clone()), position);
+        assert!(
+            server
+                .definition(GotoDefinitionParams {
+                    text_document_position_params: text_position.clone(),
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                })
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            server
+                .hover(HoverParams {
+                    text_document_position_params: text_position,
+                    work_done_progress_params: Default::default(),
+                })
+                .unwrap()
+                .is_none()
+        );
     }
 }

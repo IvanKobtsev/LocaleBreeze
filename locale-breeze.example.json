@@ -8,5 +8,6 @@
   "fullKeyFunctions": ["i18next.t"],
   "translationKeyTypes": ["TranslationKey"],
   "translationKeyProps": ["transKey"],
-  "unusedKeys": true
+  "unusedKeys": true,
+  "ignoredScopes": ["Server_Errors"]
 }

@@ -51,6 +51,8 @@ Copy `locale-breeze.example.json` to `locale-breeze.json` at the workspace root 
 
 Set `"unusedKeys": true` to fade unreferenced leaf keys in the default-locale dictionary and report them as warnings in the editor and Problems panel. The JetBrains plugin can override this value per workspace. Static-prefix templates such as ``i18next.t(`SomeScope.${value}`)`` mark every child of `SomeScope` as dynamically used; other unsupported dynamic references are not counted as uses.
 
+Set `"ignoredScopes": ["Server_Errors"]` for translation scopes owned outside the frontend. Ignored scopes and their descendants are excluded from completion, hover, navigation, references, and unused-key analysis. Referencing one from frontend source produces an `ignored scope` warning instead.
+
 Set `"translationKeyTypes": ["TranslationKey"]` to recognize string literals with an explicit matching type annotation, `as` assertion, or `satisfies` clause. Set `"translationKeyProps": ["transKey"]` to recognize literal values of matching JSX attributes and object properties. These checks are lexical and do not start a TypeScript type checker.
 
 The checked-in schema is [`schemas/config-v1.schema.json`](schemas/config-v1.schema.json).

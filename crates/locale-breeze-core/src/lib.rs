@@ -5,7 +5,9 @@ mod line_index;
 mod source;
 
 pub use config::{Config, ConfigError, DictionaryPattern};
-pub use dictionary::{DictionaryEntry, DictionaryError, EntryKind, parse_dictionary};
+pub use dictionary::{
+    DictionaryEntry, DictionaryError, EntryKind, parse_dictionary, parse_dictionary_ignoring,
+};
 pub use index::{CompletionCandidate, CompletionContext, IndexSnapshot, WorkspaceIndex};
 pub use line_index::LineIndex;
 pub use source::{OccurrenceKind, ScopeBinding, SourceOccurrence, analyze_source};
@@ -66,5 +68,6 @@ pub struct FileContribution {
     pub version: Option<i32>,
     pub dictionaries: Vec<DictionaryEntry>,
     pub occurrences: Vec<SourceOccurrence>,
+    pub ignored_occurrences: Vec<SourceOccurrence>,
     pub bindings: Vec<ScopeBinding>,
 }
