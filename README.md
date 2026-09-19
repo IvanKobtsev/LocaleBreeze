@@ -47,7 +47,7 @@ i18next.t('Page.Login.submit');
 
 ## Configuration
 
-Copy `locale-breeze.example.json` to `locale-breeze.json` at the workspace root and adjust the dictionary pattern. The pattern must contain exactly one `{locale}` token, and the configured default locale must have a matching file.
+Copy `locale-breeze.example.json` to `locale-breeze.json` at the workspace root and adjust the dictionary pattern. The pattern is relative to the workspace root, must contain exactly one `{locale}` token, and cannot be absolute. Parent-directory (`..`) segments are supported when dictionaries live above the workspace; that external dictionary directory is indexed and watched alongside the workspace. The configured default locale must have a matching file.
 
 Set `"unusedKeys": true` to fade unreferenced leaf keys in the default-locale dictionary and report them as warnings in the editor and Problems panel. The JetBrains plugin can override this value per workspace. Static-prefix templates such as ``i18next.t(`SomeScope.${value}`)`` mark every child of `SomeScope` as dynamically used; other unsupported dynamic references are not counted as uses.
 

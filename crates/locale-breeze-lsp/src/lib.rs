@@ -169,7 +169,11 @@ impl Server {
                     }
                 }) {
                     Ok(mut watcher) => {
-                        if watcher.watch(&root, RecursiveMode::Recursive).is_ok() {
+                        let workspace_watched = watcher.watch(&root, RecursiveMode::Recursive).is_ok();
+                        let dictionary_root = workspace.dictionary_root();
+                        let dictionary_watched = dictionary_root.starts_with(&root)
+                            || watcher.watch(&dictionary_root, RecursiveMode::Recursive).is_ok();
+                        if workspace_watched && dictionary_watched {
                             self.watchers.push(watcher);
                         }
                     }
@@ -207,7 +211,7 @@ impl Server {
         let path = uri.to_file_path().ok()?;
         self.workspaces
             .iter()
-            .find(|workspace| path_is_within(&path, workspace.root()))
+            .find(|workspace| workspace.contains_path(&path))
     }
 
     fn reload_workspaces(&mut self, connection: &Connection) {

@@ -7,7 +7,7 @@
   "required": ["dictionaries", "defaultLocale", "scopedFunctions", "translationMethods", "fullKeyFunctions"],
   "properties": {
     "$schema": { "type": "string" },
-    "dictionaries": { "type": "string", "description": "Workspace-relative pattern containing exactly one {locale} token." },
+    "dictionaries": { "type": "string", "description": "Pattern relative to the workspace root containing exactly one {locale} token. Absolute paths are not allowed; parent-directory (..) segments may reference dictionaries outside the workspace." },
     "defaultLocale": { "type": "string", "minLength": 1 },
     "keySeparator": { "type": "string", "minLength": 1, "default": "." },
     "scopedFunctions": { "$ref": "#/$defs/conventions" },

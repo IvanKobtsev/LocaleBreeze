@@ -408,6 +408,21 @@ impl WorkspaceIndex {
     pub fn config(&self) -> &Config {
         &self.config
     }
+    pub fn dictionary_root(&self) -> PathBuf {
+        self.config
+            .dictionary_pattern()
+            .expect("validated pattern")
+            .search_root(&self.root)
+    }
+    pub fn contains_path(&self, path: &Path) -> bool {
+        path.starts_with(&self.root)
+            || self
+                .config
+                .dictionary_pattern()
+                .expect("validated pattern")
+                .locale_for(&self.root, path)
+                .is_some()
+    }
     pub fn is_ignored_key(&self, key: &CanonicalKey) -> bool {
         is_ignored_key(
             &self.ignored_scopes,
@@ -422,16 +437,23 @@ impl WorkspaceIndex {
     pub fn rescan(&self) {
         let pattern = self.config.dictionary_pattern().expect("validated pattern");
         let mut files = HashMap::new();
-        for result in WalkBuilder::new(&self.root).standard_filters(true).build() {
-            let Ok(entry) = result else { continue };
-            if !entry.file_type().is_some_and(|x| x.is_file()) {
-                continue;
+        let dictionary_root = pattern.search_root(&self.root);
+        let mut scan_roots = vec![self.root.clone()];
+        if !dictionary_root.starts_with(&self.root) {
+            scan_roots.push(dictionary_root);
+        }
+        for scan_root in &scan_roots {
+            for result in WalkBuilder::new(scan_root).standard_filters(true).build() {
+                let Ok(entry) = result else { continue };
+                if !entry.file_type().is_some_and(|x| x.is_file()) {
+                    continue;
+                }
+                let path = entry.path();
+                let Some(contribution) = self.parse_disk_file(path, &pattern) else {
+                    continue;
+                };
+                files.insert(contribution.uri.clone(), Arc::new(contribution));
             }
-            let path = entry.path();
-            let Some(contribution) = self.parse_disk_file(path, &pattern) else {
-                continue;
-            };
-            files.insert(contribution.uri.clone(), Arc::new(contribution));
         }
         let generation = self.snapshot.load().generation + 1;
         self.snapshot
@@ -547,7 +569,7 @@ impl WorkspaceIndex {
                 ignored_occurrences: vec![],
                 bindings: vec![],
             })
-        } else if is_source(path) {
+        } else if path.starts_with(&self.root) && is_source(path) {
             self.parse_text(uri, text, None)
         } else {
             None

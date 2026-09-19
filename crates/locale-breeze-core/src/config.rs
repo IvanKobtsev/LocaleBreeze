@@ -38,6 +38,8 @@ pub enum ConfigError {
     Json(#[from] serde_json::Error),
     #[error("dictionary pattern must contain exactly one {{locale}} token")]
     LocaleToken,
+    #[error("dictionary pattern must be relative to the workspace root")]
+    AbsoluteDictionaryPattern,
     #[error("{0} must not be empty")]
     Empty(&'static str),
     #[error("ignored scope {0:?} is not a valid translation key")]
@@ -122,19 +124,27 @@ impl DictionaryPattern {
         if pattern.matches("{locale}").count() != 1 {
             return Err(ConfigError::LocaleToken);
         }
-        let (before, after) = pattern.split_once("{locale}").unwrap();
-        let glob = format!("{}*{}", before.replace('\\', "/"), after.replace('\\', "/"));
+        let normalized = pattern.replace('\\', "/");
+        let bytes = normalized.as_bytes();
+        let has_windows_drive = bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && bytes[2] == b'/';
+        if normalized.starts_with('/') || has_windows_drive {
+            return Err(ConfigError::AbsoluteDictionaryPattern);
+        }
+        let normalized = normalize_pattern(&normalized);
+        let (before, after) = normalized.split_once("{locale}").unwrap();
+        let glob = format!("{}*{}", before, after);
         Ok(Self {
-            before: before.replace('\\', "/"),
-            after: after.replace('\\', "/"),
+            before: before.to_owned(),
+            after: after.to_owned(),
             matcher: Glob::new(&glob)?.compile_matcher(),
         })
     }
 
     pub fn locale_for(&self, root: &Path, path: &Path) -> Option<String> {
-        let relative = path
-            .strip_prefix(root)
-            .ok()?
+        let relative = relative_path(root, path)?
             .to_string_lossy()
             .replace('\\', "/");
         if !self.matcher.is_match(&relative) {
@@ -145,6 +155,62 @@ impl DictionaryPattern {
             .strip_suffix(&self.after)?;
         (!middle.is_empty() && !middle.contains('/')).then(|| middle.to_owned())
     }
+
+    pub fn search_root(&self, root: &Path) -> PathBuf {
+        let directory = Path::new(&self.before).parent().unwrap_or_else(|| Path::new(""));
+        normalize_path(&root.join(directory))
+    }
+}
+
+fn normalize_pattern(pattern: &str) -> String {
+    let mut components: Vec<&str> = Vec::new();
+    for component in pattern.split('/') {
+        match component {
+            "" | "." => {}
+            ".." if components.last().is_some_and(|value| *value != "..") => {
+                components.pop();
+            }
+            component => components.push(component),
+        }
+    }
+    components.join("/")
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn relative_path(root: &Path, path: &Path) -> Option<PathBuf> {
+    let root = normalize_path(root);
+    let path = normalize_path(path);
+    let root_components: Vec<_> = root.components().collect();
+    let path_components: Vec<_> = path.components().collect();
+    let common = root_components
+        .iter()
+        .zip(&path_components)
+        .take_while(|(left, right)| left == right)
+        .count();
+    if common == 0 {
+        return None;
+    }
+    let mut relative = PathBuf::new();
+    for _ in common..root_components.len() {
+        relative.push("..");
+    }
+    for component in &path_components[common..] {
+        relative.push(component.as_os_str());
+    }
+    Some(relative)
 }
 
 #[cfg(test)]
@@ -191,5 +257,30 @@ mod tests {
         }))
         .unwrap();
         assert!(config.ignored_scopes.is_empty());
+    }
+
+    #[test]
+    fn rejects_absolute_dictionary_patterns() {
+        for pattern in [
+            "/translations/translation.{locale}.json",
+            r"C:\translations\translation.{locale}.json",
+            r"\\server\share\translation.{locale}.json",
+        ] {
+            assert!(matches!(
+                DictionaryPattern::new(pattern),
+                Err(ConfigError::AbsoluteDictionaryPattern)
+            ));
+        }
+    }
+
+    #[test]
+    fn matches_a_dictionary_above_the_workspace() {
+        let root = Path::new("/project/packages/app");
+        let pattern = DictionaryPattern::new("../../translations/translation.{locale}.json").unwrap();
+        assert_eq!(
+            pattern.locale_for(root, Path::new("/project/translations/translation.en.json")),
+            Some("en".to_owned())
+        );
+        assert_eq!(pattern.search_root(root), Path::new("/project/translations"));
     }
 }
