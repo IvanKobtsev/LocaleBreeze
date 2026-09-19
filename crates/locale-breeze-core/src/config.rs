@@ -157,7 +157,9 @@ impl DictionaryPattern {
     }
 
     pub fn search_root(&self, root: &Path) -> PathBuf {
-        let directory = Path::new(&self.before).parent().unwrap_or_else(|| Path::new(""));
+        let directory = Path::new(&self.before)
+            .parent()
+            .unwrap_or_else(|| Path::new(""));
         normalize_path(&root.join(directory))
     }
 }
@@ -276,11 +278,15 @@ mod tests {
     #[test]
     fn matches_a_dictionary_above_the_workspace() {
         let root = Path::new("/project/packages/app");
-        let pattern = DictionaryPattern::new("../../translations/translation.{locale}.json").unwrap();
+        let pattern =
+            DictionaryPattern::new("../../translations/translation.{locale}.json").unwrap();
         assert_eq!(
             pattern.locale_for(root, Path::new("/project/translations/translation.en.json")),
             Some("en".to_owned())
         );
-        assert_eq!(pattern.search_root(root), Path::new("/project/translations"));
+        assert_eq!(
+            pattern.search_root(root),
+            Path::new("/project/translations")
+        );
     }
 }
