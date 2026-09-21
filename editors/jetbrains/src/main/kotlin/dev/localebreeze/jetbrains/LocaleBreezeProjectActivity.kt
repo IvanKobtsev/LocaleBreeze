@@ -7,15 +7,26 @@ import com.intellij.openapi.vfs.VirtualFileManager
 import com.intellij.openapi.vfs.newvfs.BulkFileListener
 import com.intellij.openapi.vfs.newvfs.events.VFileEvent
 import com.intellij.platform.lsp.api.LspClientManager
+import com.intellij.notification.NotificationAction
+import com.intellij.notification.NotificationGroupManager
+import com.intellij.notification.NotificationType
+import com.intellij.openapi.components.service
+import com.intellij.openapi.options.ShowSettingsUtil
+import java.nio.file.Files
 import java.nio.file.Path
 
 class LocaleBreezeProjectActivity : ProjectActivity {
     override suspend fun execute(project: Project) {
+        offerEnablement(project)
         project.messageBus.connect(project).subscribe(
             VirtualFileManager.VFS_CHANGES,
             object : BulkFileListener {
                 override fun after(events: List<VFileEvent>) {
-                    if (events.none { isConfigurationFile(project, it.path) }) return
+                    if (!LocaleBreezeSettings.getInstance(project).state.enabled) return
+                    if (events.none {
+                        isConfigurationFile(project, it.path) ||
+                            project.service<LocaleBreezeWarningCoordinator>().concerns(it.path)
+                    }) return
                     ApplicationManager.getApplication().invokeLater {
                         if (!project.isDisposed) {
                             LspClientManager.getInstance(project).stopAndRestartClientsIfNeeded(
@@ -26,6 +37,38 @@ class LocaleBreezeProjectActivity : ProjectActivity {
                 }
             },
         )
+    }
+
+    private fun offerEnablement(project: Project) {
+        val state = LocaleBreezeSettings.getInstance(project).state
+        if (state.enabled || state.enablePromptDismissed) return
+        val config = effectiveConfigPath(project) ?: return
+        if (!Files.isRegularFile(config)) return
+        state.enablePromptDismissed = true
+        NotificationGroupManager.getInstance().getNotificationGroup("LocaleBreeze")
+            .createNotification(
+                "Enable LocaleBreeze for this workspace?",
+                "A <code>locale-breeze.json</code> configuration was found.",
+                NotificationType.INFORMATION,
+            )
+            .addAction(NotificationAction.createSimpleExpiring("Enable") {
+                state.enabled = true
+                LspClientManager.getInstance(project).stopAndRestartClientsIfNeeded(
+                    LocaleBreezeLspIntegrationProvider::class.java,
+                )
+                project.service<LocaleBreezeKeyCache>().invalidate()
+                com.intellij.codeInsight.daemon.DaemonCodeAnalyzer.getInstance(project).restart()
+            })
+            .addAction(NotificationAction.createSimpleExpiring("Open Settings") {
+                ShowSettingsUtil.getInstance().showSettingsDialog(project, LocaleBreezeConfigurable::class.java)
+            })
+            .notify(project)
+    }
+
+    private fun effectiveConfigPath(project: Project): Path? {
+        val configured = LocaleBreezeSettings.getInstance(project).state.configPath
+        if (configured.isBlank()) return project.basePath?.let(Path::of)?.resolve("locale-breeze.json")
+        return Path.of(configured).let { if (it.isAbsolute) it else project.basePath?.let(Path::of)?.resolve(it) }
     }
 
     private fun isConfigurationFile(project: Project, changedPath: String): Boolean {

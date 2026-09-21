@@ -48,6 +48,13 @@ pub enum ConfigError {
     Glob(#[from] globset::Error),
     #[error("default locale {0:?} has no matching dictionary")]
     MissingDefaultLocale(String),
+    #[error("dictionary {path} is invalid: {message}")]
+    InvalidDictionary {
+        path: PathBuf,
+        message: String,
+        line: Option<usize>,
+        column: Option<usize>,
+    },
 }
 
 impl Config {

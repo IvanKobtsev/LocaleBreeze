@@ -1,6 +1,7 @@
 use anyhow::Result;
 use locale_breeze_core::{
-    ByteRange, CanonicalKey, EntryKind, IndexSnapshot, LineIndex, OccurrenceKind, WorkspaceIndex,
+    ByteRange, CanonicalKey, ConfigError, DictionaryIssue, EntryKind, IndexSnapshot, LineIndex, OccurrenceKind,
+    WorkspaceIndex,
 };
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::*;
@@ -70,6 +71,7 @@ pub fn run_stdio(
 
 struct Server {
     workspaces: Vec<Arc<WorkspaceIndex>>,
+    workspace_roots: HashSet<PathBuf>,
     watchers: Vec<RecommendedWatcher>,
     config_override: Option<PathBuf>,
     unused_keys_override: Option<bool>,
@@ -110,10 +112,24 @@ struct PreparedEdit {
     new_text: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceIssue {
+    version: u8,
+    active: bool,
+    code: &'static str,
+    summary: String,
+    remediation: String,
+    path: Option<String>,
+    line: Option<usize>,
+    column: Option<usize>,
+}
+
 impl Server {
     fn new(config_override: Option<PathBuf>, unused_keys_override: Option<bool>) -> Self {
         Self {
             workspaces: vec![],
+            workspace_roots: HashSet::new(),
             watchers: vec![],
             config_override,
             unused_keys_override,
@@ -136,6 +152,7 @@ impl Server {
 
     fn add_workspace(&mut self, connection: &Connection, uri: Url) {
         let Ok(root) = uri.to_file_path() else { return };
+        self.workspace_roots.insert(root.clone());
         if self.workspaces.iter().any(|w| same_path(w.root(), &root)) {
             return;
         }
@@ -149,14 +166,26 @@ impl Server {
             self.unused_keys_override,
         ) {
             Ok(workspace) => {
+                publish_workspace_issue(connection, WorkspaceIssue::clear());
                 let workspace = Arc::new(workspace);
                 let watched = workspace.clone();
                 let sender = connection.sender.clone();
                 let published_diagnostics = self.published_diagnostics.clone();
+                let mut watcher_registered = false;
                 match notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
                     if let Ok(event) = event {
                         for path in event.paths {
-                            watched.refresh_disk_path(&path);
+                            let is_dictionary = watched.is_dictionary_path(&path);
+                            if let Some(issue) = watched.refresh_disk_path(&path) {
+                                let _ = sender.send(Message::Notification(Notification::new(
+                                    "localeBreeze/workspaceIssue".into(),
+                                    WorkspaceIssue::from_dictionary_issue(issue),
+                                )));
+                            } else if is_dictionary {
+                                let _ = sender.send(Message::Notification(Notification::new(
+                                    "localeBreeze/workspaceIssue".into(), WorkspaceIssue::clear_dictionary(&path),
+                                )));
+                            }
                         }
                         for notification in
                             diagnostic_notifications(&watched, &published_diagnostics)
@@ -178,13 +207,21 @@ impl Server {
                                 .is_ok();
                         if workspace_watched && dictionary_watched {
                             self.watchers.push(watcher);
+                            watcher_registered = true;
                         }
                     }
                     Err(error) => log(
-                        connection,
-                        MessageType::WARNING,
+                        connection, MessageType::WARNING,
                         format!("LocaleBreeze could not watch {}: {error}", root.display()),
                     ),
+                }
+                if !watcher_registered {
+                    publish_workspace_issue(connection, WorkspaceIssue {
+                        version: 1, active: true, code: "watcher_failed",
+                        summary: "LocaleBreeze cannot watch workspace files".into(),
+                        remediation: "Automatic refresh is unavailable. Check file permissions, then restart the language server from LocaleBreeze settings.".into(),
+                        path: Some(root.display().to_string()), line: None, column: None,
+                    });
                 }
                 log(
                     connection,
@@ -202,11 +239,10 @@ impl Server {
                     publish_diagnostics(connection, workspace, &self.published_diagnostics);
                 }
             }
-            Err(error) => log(
-                connection,
-                MessageType::ERROR,
-                format!("LocaleBreeze disabled for {}: {error}", root.display()),
-            ),
+            Err(error) => {
+                publish_workspace_issue(connection, WorkspaceIssue::from_config_error(&error, &config_path));
+                log(connection, MessageType::ERROR, format!("LocaleBreeze disabled for {}: {error}", root.display()));
+            }
         }
     }
 
@@ -218,11 +254,7 @@ impl Server {
     }
 
     fn reload_workspaces(&mut self, connection: &Connection) {
-        let roots: Vec<_> = self
-            .workspaces
-            .iter()
-            .filter_map(|workspace| Url::from_file_path(workspace.root()).ok())
-            .collect();
+        let roots: Vec<_> = self.workspace_roots.iter().filter_map(|root| Url::from_file_path(root).ok()).collect();
         for workspace in &self.workspaces {
             clear_diagnostics(connection, workspace, &self.published_diagnostics);
         }
@@ -349,6 +381,7 @@ impl Server {
                             }
                             self.workspaces
                                 .retain(|workspace| !same_path(workspace.root(), &path));
+                            self.workspace_roots.retain(|root| !same_path(root, &path));
                         }
                     }
                     for added in p.event.added {
@@ -1175,6 +1208,134 @@ fn log(connection: &Connection, typ: MessageType, message: String) {
     let _ = connection.sender.send(Message::Notification(notification));
 }
 
+fn publish_workspace_issue(connection: &Connection, issue: WorkspaceIssue) {
+    let notification = Notification::new("localeBreeze/workspaceIssue".into(), issue);
+    let _ = connection.sender.send(Message::Notification(notification));
+}
+
+impl WorkspaceIssue {
+    fn clear() -> Self {
+        Self {
+            version: 1,
+            active: false,
+            code: "clear",
+            summary: String::new(),
+            remediation: String::new(),
+            path: None,
+            line: None,
+            column: None,
+        }
+    }
+
+    fn clear_dictionary(path: &std::path::Path) -> Self {
+        Self {
+            version: 1,
+            active: false,
+            code: "dictionary_invalid",
+            summary: String::new(),
+            remediation: String::new(),
+            path: Some(path.display().to_string()),
+            line: None,
+            column: None,
+        }
+    }
+
+    fn from_config_error(error: &ConfigError, config_path: &std::path::Path) -> Self {
+        let path = Some(config_path.display().to_string());
+        let (code, summary, remediation, line, column) = match error {
+            ConfigError::Read(_, source) if source.kind() == std::io::ErrorKind::NotFound => (
+                "config_missing",
+                "LocaleBreeze configuration was not found".into(),
+                "Create the configuration file or select the correct file in LocaleBreeze settings.".into(),
+                None,
+                None,
+            ),
+            ConfigError::Read(_, _) => (
+                "config_unreadable",
+                "LocaleBreeze cannot read its configuration".into(),
+                "Check that the file exists and that WebStorm has permission to read it.".into(),
+                None,
+                None,
+            ),
+            ConfigError::Json(source) => (
+                "config_json",
+                "LocaleBreeze configuration contains invalid JSON".into(),
+                "Correct the JSON syntax, then save the file. LocaleBreeze will retry automatically.".into(),
+                Some(source.line()),
+                Some(source.column()),
+            ),
+            ConfigError::LocaleToken => (
+                "config_dictionary_pattern",
+                "The dictionary pattern is invalid".into(),
+                "Set `dictionaries` to a relative pattern containing exactly one `{locale}` token, for example `public/dictionaries/translation.{locale}.json`.".into(),
+                None,
+                None,
+            ),
+            ConfigError::AbsoluteDictionaryPattern => (
+                "config_dictionary_pattern",
+                "The dictionary pattern must be relative".into(),
+                "Use a path relative to the workspace root; parent-directory (`..`) segments are supported.".into(),
+                None,
+                None,
+            ),
+            ConfigError::Empty(field) => (
+                "config_value",
+                format!("LocaleBreeze configuration field `{field}` is empty"),
+                "Provide at least one valid value for this field, then save the configuration.".into(),
+                None,
+                None,
+            ),
+            ConfigError::InvalidIgnoredScope(scope) => (
+                "config_value",
+                format!("Ignored scope `{scope}` is not a valid translation key"),
+                "Use the configured key separator and remove empty key segments.".into(),
+                None,
+                None,
+            ),
+            ConfigError::Glob(_) => (
+                "config_dictionary_pattern",
+                "The dictionary pattern is not a valid file pattern".into(),
+                "Correct the `dictionaries` pattern, then save the configuration.".into(),
+                None,
+                None,
+            ),
+            ConfigError::MissingDefaultLocale(locale) => (
+                "dictionary_default_missing",
+                format!("No dictionary was found for the default locale `{locale}`"),
+                "Check `defaultLocale`, the `dictionaries` pattern, and that the matching dictionary file exists and contains valid JSON.".into(),
+                None,
+                None,
+            ),
+            ConfigError::InvalidDictionary { path: dictionary, message, line, column } => {
+                return Self {
+                    version: 1,
+                    active: true,
+                    code: "dictionary_invalid",
+                    summary: "LocaleBreeze could not read a dictionary".into(),
+                    remediation: format!("{message}. Correct the dictionary and save it; LocaleBreeze will retry automatically."),
+                    path: Some(dictionary.display().to_string()),
+                    line: *line,
+                    column: *column,
+                };
+            }
+        };
+        Self { version: 1, active: true, code, summary, remediation, path, line, column }
+    }
+
+    fn from_dictionary_issue(issue: DictionaryIssue) -> Self {
+        Self {
+            version: 1,
+            active: true,
+            code: "dictionary_invalid",
+            summary: "LocaleBreeze could not read a dictionary".into(),
+            remediation: format!("{}. Correct the dictionary and save it; LocaleBreeze will refresh automatically.", issue.message),
+            path: Some(issue.path.display().to_string()),
+            line: issue.line,
+            column: issue.column,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1270,7 +1431,7 @@ mod tests {
             "{\n\n  \"my_key\": \"Value\"\n}",
         )
         .unwrap();
-        workspace.refresh_disk_path(&temp.path().join("translation.en.json"));
+        let _ = workspace.refresh_disk_path(&temp.path().join("translation.en.json"));
         let refreshed = diagnostic_notifications(&workspace, &published);
         assert_eq!(refreshed.len(), 1);
         let refreshed_params: PublishDiagnosticsParams =

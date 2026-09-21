@@ -12,6 +12,8 @@ import com.intellij.openapi.project.Project
 @State(name = "LocaleBreezeSettings", storages = [Storage(StoragePathMacros.WORKSPACE_FILE)])
 class LocaleBreezeSettings : PersistentStateComponent<LocaleBreezeSettings.Data> {
     data class Data(
+        var enabled: Boolean = false,
+        var enablePromptDismissed: Boolean = false,
         var configPath: String = "",
         var overrideConfig: Boolean = false,
         var showUnusedKeys: Boolean = true,

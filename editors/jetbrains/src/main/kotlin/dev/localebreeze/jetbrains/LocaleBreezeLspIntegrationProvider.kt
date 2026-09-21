@@ -1,8 +1,7 @@
 package dev.localebreeze.jetbrains
 
 import com.intellij.execution.configurations.GeneralCommandLine
-import com.intellij.notification.NotificationGroupManager
-import com.intellij.notification.NotificationType
+import com.intellij.openapi.components.service
 import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
@@ -10,13 +9,15 @@ import com.intellij.openapi.util.Key
 import com.intellij.openapi.util.SystemInfoRt
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.platform.lsp.api.LspClientManager
+import com.intellij.platform.lsp.api.Lsp4jClient
+import com.intellij.platform.lsp.api.LspServerNotificationsHandler
 import com.intellij.platform.lsp.api.LspIntegrationProvider
 import com.intellij.platform.lsp.api.ProjectWideLspClientDescriptor
 import com.intellij.platform.lsp.api.customization.LspCustomization
 import com.intellij.platform.lsp.api.customization.LspGoToDefinitionDisabled
 import java.nio.file.Files
 import java.nio.file.Path
-import java.util.concurrent.ConcurrentHashMap
+import org.eclipse.lsp4j.jsonrpc.services.JsonNotification
 
 class LocaleBreezeLspIntegrationProvider : LspIntegrationProvider {
     private val log = Logger.getInstance(LocaleBreezeLspIntegrationProvider::class.java)
@@ -26,9 +27,16 @@ class LocaleBreezeLspIntegrationProvider : LspIntegrationProvider {
         file: VirtualFile,
         clientStarter: LspIntegrationProvider.LspClientStarter,
     ) {
+        if (!LocaleBreezeSettings.getInstance(project).state.enabled) return
         if (!isSupported(file)) return
         if (LocaleBreezeExecutable.resolve(project) == null) {
-            notifyMissingExecutable(project)
+            project.service<LocaleBreezeWarningCoordinator>().show(
+                LocaleBreezeWorkspaceIssue(
+                    code = "server_missing",
+                    summary = "LocaleBreeze language server is missing",
+                    remediation = "Reinstall the LocaleBreeze plugin to restore its bundled language-server executable.",
+                ),
+            )
             return
         }
         val descriptor = descriptor(project)
@@ -43,22 +51,9 @@ class LocaleBreezeLspIntegrationProvider : LspIntegrationProvider {
         clientStarter.ensureClientStarted(descriptor)
     }
 
-    private fun notifyMissingExecutable(project: Project) {
-        if (!notifiedProjects.add(project.locationHash)) return
-        NotificationGroupManager.getInstance()
-            .getNotificationGroup("LocaleBreeze")
-            .createNotification(
-                "LocaleBreeze server not found",
-                "Reinstall LocaleBreeze to restore its bundled language-server executable.",
-                NotificationType.ERROR,
-            )
-            .notify(project)
-    }
-
     companion object {
         private val descriptorKey =
             Key.create<LocaleBreezeLspClientDescriptor>("dev.localebreeze.jetbrains.lspDescriptor")
-        private val notifiedProjects = ConcurrentHashMap.newKeySet<String>()
         private val supportedExtensions = setOf("js", "jsx", "ts", "tsx", "json")
 
         internal fun isSupported(file: VirtualFile): Boolean =
@@ -79,7 +74,11 @@ private class LocaleBreezeLspClientDescriptor(
     private val log = Logger.getInstance(LocaleBreezeLspClientDescriptor::class.java)
 
     override fun isSupportedFile(file: VirtualFile): Boolean =
-        LocaleBreezeLspIntegrationProvider.isSupported(file)
+        LocaleBreezeSettings.getInstance(project).state.enabled &&
+            LocaleBreezeLspIntegrationProvider.isSupported(file)
+
+    override fun createLsp4jClient(handler: LspServerNotificationsHandler): Lsp4jClient =
+        LocaleBreezeLsp4jClient(handler, project)
 
     override fun createCommandLine(): GeneralCommandLine {
         val executable = checkNotNull(LocaleBreezeExecutable.resolve(project)) {
@@ -101,6 +100,19 @@ private class LocaleBreezeLspClientDescriptor(
     }
 
     override val lspCustomization: LspCustomization = LocaleBreezeLspCustomization
+}
+
+private class LocaleBreezeLsp4jClient(
+    handler: LspServerNotificationsHandler,
+    private val project: Project,
+) : Lsp4jClient(handler) {
+    @JsonNotification("localeBreeze/workspaceIssue")
+    fun workspaceIssue(issue: LocaleBreezeWorkspaceIssue) {
+        if (issue.active) project.service<LocaleBreezeWarningCoordinator>().show(issue)
+        else project.service<LocaleBreezeWarningCoordinator>().clear(
+            issue.identity.takeUnless { issue.code == "clear" },
+        )
+    }
 }
 
 private object LocaleBreezeLspCustomization : LspCustomization() {

@@ -55,6 +55,7 @@ class LocaleBreezeGotoDeclarationHandler : GotoDeclarationHandler {
         val element = sourceElement ?: return null
         val actualEditor = editor ?: return null
         val project = element.project
+        if (!LocaleBreezeSettings.getInstance(project).state.enabled) return null
         val file = element.containingFile?.virtualFile ?: return null
         if (!LocaleBreezeLspIntegrationProvider.isSupported(file)) return null
 

@@ -20,9 +20,11 @@ class LocaleBreezeCopyFullKeyAction : AnAction() {
     override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.BGT
 
     override fun update(event: AnActionEvent) {
+        val project = event.project
         val file = event.getData(CommonDataKeys.VIRTUAL_FILE)
         event.presentation.isEnabledAndVisible =
-            file?.extension.equals("json", ignoreCase = true) &&
+            project != null && LocaleBreezeSettings.getInstance(project).state.enabled &&
+                file?.extension.equals("json", ignoreCase = true) &&
                 event.getData(CommonDataKeys.EDITOR) != null
     }
 

@@ -364,6 +364,14 @@ pub struct WorkspaceIndex {
     snapshot: ArcSwap<IndexSnapshot>,
 }
 
+#[derive(Clone, Debug)]
+pub struct DictionaryIssue {
+    pub path: PathBuf,
+    pub message: String,
+    pub line: Option<usize>,
+    pub column: Option<usize>,
+}
+
 impl WorkspaceIndex {
     pub fn load(root: PathBuf, config_path: &Path) -> Result<Self, crate::ConfigError> {
         Self::load_with_unused_override(root, config_path, None)
@@ -387,6 +395,14 @@ impl WorkspaceIndex {
         };
         this.rescan();
         let dictionary_pattern = this.config.dictionary_pattern()?;
+        if let Some(issue) = this.first_dictionary_issue(&dictionary_pattern) {
+            return Err(crate::ConfigError::InvalidDictionary {
+                path: issue.path,
+                message: issue.message,
+                line: issue.line,
+                column: issue.column,
+            });
+        }
         if !this
             .snapshot()
             .files
@@ -402,6 +418,31 @@ impl WorkspaceIndex {
         Ok(this)
     }
 
+    fn first_dictionary_issue(&self, pattern: &crate::DictionaryPattern) -> Option<DictionaryIssue> {
+        let root = pattern.search_root(&self.root);
+        for result in WalkBuilder::new(root).standard_filters(true).build() {
+            let entry = result.ok()?;
+            if !entry.file_type().is_some_and(|kind| kind.is_file()) || pattern.locale_for(&self.root, entry.path()).is_none() {
+                continue;
+            }
+            let path = entry.path();
+            let text = match std::fs::read_to_string(path) {
+                Ok(text) => text,
+                Err(error) => return Some(DictionaryIssue { path: path.to_owned(), message: format!("could not read dictionary: {error}"), line: None, column: None }),
+            };
+            let uri = Url::from_file_path(path).ok()?;
+            let locale = pattern.locale_for(&self.root, path)?;
+            if let Err(error) = parse_dictionary_ignoring(&uri, &locale, &text, &self.config.key_separator, &|key| self.is_ignored_key(key)) {
+                let (line, column) = match &error {
+                    crate::DictionaryError::InvalidJson(source) => (Some(source.line()), Some(source.column())),
+                    crate::DictionaryError::Parser => (None, None),
+                };
+                return Some(DictionaryIssue { path: path.to_owned(), message: error.to_string(), line, column });
+            }
+        }
+        None
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -413,6 +454,13 @@ impl WorkspaceIndex {
             .dictionary_pattern()
             .expect("validated pattern")
             .search_root(&self.root)
+    }
+    pub fn is_dictionary_path(&self, path: &Path) -> bool {
+        self.config
+            .dictionary_pattern()
+            .ok()
+            .and_then(|pattern| pattern.locale_for(&self.root, path))
+            .is_some()
     }
     pub fn contains_path(&self, path: &Path) -> bool {
         path.starts_with(&self.root)
@@ -525,13 +573,31 @@ impl WorkspaceIndex {
         }
     }
 
-    pub fn refresh_disk_path(&self, path: &Path) {
+    pub fn refresh_disk_path(&self, path: &Path) -> Option<DictionaryIssue> {
         let Ok(uri) = Url::from_file_path(path) else {
-            return;
+            return None;
         };
         let file_key = normalized_uri(&uri);
         let current = self.snapshot.load_full();
         let pattern = self.config.dictionary_pattern().expect("validated pattern");
+        let dictionary_issue = pattern.locale_for(&self.root, path).and_then(|locale| {
+            let text = match std::fs::read_to_string(path) {
+                Ok(text) => text,
+                Err(error) => return Some(DictionaryIssue {
+                    path: path.to_owned(), message: format!("could not read dictionary: {error}"),
+                    line: None, column: None,
+                }),
+            };
+            parse_dictionary_ignoring(
+                &uri, &locale, &text, &self.config.key_separator, &|key| self.is_ignored_key(key),
+            ).err().map(|error| {
+                let (line, column) = match &error {
+                    crate::DictionaryError::InvalidJson(source) => (Some(source.line()), Some(source.column())),
+                    crate::DictionaryError::Parser => (None, None),
+                };
+                DictionaryIssue { path: path.to_owned(), message: error.to_string(), line, column }
+            })
+        });
         let mut files = current.files.clone();
         if let Some(contribution) = self.parse_disk_file(path, &pattern) {
             files.insert(file_key.clone(), Arc::new(contribution));
@@ -542,6 +608,7 @@ impl WorkspaceIndex {
             current.generation + 1,
             files,
         )));
+        dictionary_issue
     }
 
     fn parse_disk_file(
@@ -1041,6 +1108,23 @@ mod tests {
     }
 
     #[test]
+    fn reports_malformed_dictionary_during_workspace_load() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("locale-breeze.json"),
+            r#"{"dictionaries":"translation.{locale}.json","defaultLocale":"en","scopedFunctions":["useScopedTranslation"],"translationMethods":["t"],"fullKeyFunctions":["i18next.t"]}"#,
+        )
+        .unwrap();
+        std::fs::write(temp.path().join("translation.en.json"), "{ invalid").unwrap();
+
+        let result = WorkspaceIndex::load(
+            temp.path().to_owned(),
+            &temp.path().join("locale-breeze.json"),
+        );
+        assert!(matches!(result, Err(crate::ConfigError::InvalidDictionary { .. })));
+    }
+
+    #[test]
     fn recovers_after_an_invalid_intermediate_dictionary_edit() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -1102,7 +1186,7 @@ mod tests {
         workspace.update_text(uri.clone(), r#"{"Page":{"key":"Editor"}}"#.into(), Some(10));
         let disk_text = "{\n  \"Page\": {\n    \"key\": \"External\"\n  }\n}";
         std::fs::write(&dictionary_path, disk_text).unwrap();
-        workspace.refresh_disk_path(&dictionary_path);
+        let _ = workspace.refresh_disk_path(&dictionary_path);
         assert_eq!(workspace.snapshot().text(&uri), Some(disk_text));
 
         // An editor may restart its document version after reloading an

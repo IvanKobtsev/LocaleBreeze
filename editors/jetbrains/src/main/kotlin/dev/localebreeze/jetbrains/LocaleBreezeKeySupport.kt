@@ -94,6 +94,7 @@ class LocaleBreezeKeyCache(private val project: Project) {
     }
 
     fun ranges(file: VirtualFile, document: Document): List<LocaleBreezeKeyRange> {
+        if (!LocaleBreezeSettings.getInstance(project).state.enabled) return emptyList()
         ensure(file, document)
         return values[file.url]?.takeIf { it.stamp == document.modificationStamp }?.keys.orEmpty()
     }
@@ -174,6 +175,7 @@ class LocaleBreezeKeyCache(private val project: Project) {
 class LocaleBreezeKeyAnnotator : Annotator {
     override fun annotate(element: PsiElement, holder: AnnotationHolder) {
         val file = element as? PsiFile ?: return
+        if (!LocaleBreezeSettings.getInstance(file.project).state.enabled) return
         val virtualFile = file.virtualFile ?: return
         if (virtualFile.extension?.lowercase() !in setOf("js", "jsx", "ts", "tsx")) return
         val document = file.viewProvider.document ?: return
@@ -193,7 +195,7 @@ class LocaleBreezeAddKeyAction : AnAction() {
         val project = event.project
         val file = event.getData(CommonDataKeys.VIRTUAL_FILE)
         val editor = event.getData(CommonDataKeys.EDITOR)
-        val available = if (project != null && file != null && editor != null) {
+        val available = if (project != null && LocaleBreezeSettings.getInstance(project).state.enabled && file != null && editor != null) {
             project.service<LocaleBreezeKeyCache>()
                 .at(file, editor.document, editor.caretModel.offset)
                 ?.canAdd == true
