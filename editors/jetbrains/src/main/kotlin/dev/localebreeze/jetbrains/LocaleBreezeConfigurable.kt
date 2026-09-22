@@ -76,7 +76,14 @@ class LocaleBreezeConfigurable(private val project: Project) : Configurable {
     }
 
     override fun apply() {
-        val state = LocaleBreezeSettings.getInstance(project).state
+        val settings = LocaleBreezeSettings.getInstance(project)
+        val state = settings.state
+        if (enabled.isSelected != state.enabled) {
+            settings.setActivationMode(
+                if (enabled.isSelected) LocaleBreezeSettings.ActivationMode.ENABLED
+                else LocaleBreezeSettings.ActivationMode.DISABLED,
+            )
+        }
         state.enabled = enabled.isSelected
         state.configPath = configPath.text.trim()
         state.overrideConfig = overrideConfig.isSelected
@@ -84,7 +91,8 @@ class LocaleBreezeConfigurable(private val project: Project) : Configurable {
         LspClientManager.getInstance(project)
             .stopAndRestartClientsIfNeeded(LocaleBreezeLspIntegrationProvider::class.java)
         project.service<LocaleBreezeKeyCache>().invalidate()
-        if (!state.enabled) project.service<LocaleBreezeWarningCoordinator>().clear()
+        if (state.enabled) project.service<LocaleBreezeWarningCoordinator>().starting()
+        else project.service<LocaleBreezeWarningCoordinator>().disabled()
         DaemonCodeAnalyzer.getInstance(project).restart()
     }
 

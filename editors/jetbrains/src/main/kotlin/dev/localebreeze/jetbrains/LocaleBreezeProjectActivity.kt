@@ -7,17 +7,13 @@ import com.intellij.openapi.vfs.VirtualFileManager
 import com.intellij.openapi.vfs.newvfs.BulkFileListener
 import com.intellij.openapi.vfs.newvfs.events.VFileEvent
 import com.intellij.platform.lsp.api.LspClientManager
-import com.intellij.notification.NotificationAction
-import com.intellij.notification.NotificationGroupManager
-import com.intellij.notification.NotificationType
 import com.intellij.openapi.components.service
-import com.intellij.openapi.options.ShowSettingsUtil
 import java.nio.file.Files
 import java.nio.file.Path
 
 class LocaleBreezeProjectActivity : ProjectActivity {
     override suspend fun execute(project: Project) {
-        offerEnablement(project)
+        applyAutomaticActivation(project)
         project.messageBus.connect(project).subscribe(
             VirtualFileManager.VFS_CHANGES,
             object : BulkFileListener {
@@ -39,30 +35,19 @@ class LocaleBreezeProjectActivity : ProjectActivity {
         )
     }
 
-    private fun offerEnablement(project: Project) {
-        val state = LocaleBreezeSettings.getInstance(project).state
-        if (state.enabled || state.enablePromptDismissed) return
-        val config = effectiveConfigPath(project) ?: return
-        if (!Files.isRegularFile(config)) return
-        state.enablePromptDismissed = true
-        NotificationGroupManager.getInstance().getNotificationGroup("LocaleBreeze")
-            .createNotification(
-                "Enable LocaleBreeze for this workspace?",
-                "A <code>locale-breeze.json</code> configuration was found.",
-                NotificationType.INFORMATION,
-            )
-            .addAction(NotificationAction.createSimpleExpiring("Enable") {
-                state.enabled = true
-                LspClientManager.getInstance(project).stopAndRestartClientsIfNeeded(
-                    LocaleBreezeLspIntegrationProvider::class.java,
-                )
-                project.service<LocaleBreezeKeyCache>().invalidate()
-                com.intellij.codeInsight.daemon.DaemonCodeAnalyzer.getInstance(project).restart()
-            })
-            .addAction(NotificationAction.createSimpleExpiring("Open Settings") {
-                ShowSettingsUtil.getInstance().showSettingsDialog(project, LocaleBreezeConfigurable::class.java)
-            })
-            .notify(project)
+    private fun applyAutomaticActivation(project: Project) {
+        val settings = LocaleBreezeSettings.getInstance(project)
+        val state = settings.state
+        if (settings.activationMode() == LocaleBreezeSettings.ActivationMode.DISABLED) {
+            state.enabled = false
+            project.service<LocaleBreezeWarningCoordinator>().disabled()
+            return
+        }
+        val shouldEnable = settings.activationMode() == LocaleBreezeSettings.ActivationMode.ENABLED ||
+            effectiveConfigPath(project)?.let(Files::isRegularFile) == true
+        state.enabled = shouldEnable
+        if (shouldEnable) project.service<LocaleBreezeWarningCoordinator>().starting()
+        else project.service<LocaleBreezeWarningCoordinator>().disabled()
     }
 
     private fun effectiveConfigPath(project: Project): Path? {

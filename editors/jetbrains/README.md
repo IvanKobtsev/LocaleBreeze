@@ -4,7 +4,7 @@ This is a thin WebStorm launcher for the LocaleBreeze Rust language server. The 
 
 ## Development
 
-Install a JDK 25 and run `gradlew runIde`. The plugin uses its bundled LocaleBreeze executable. In the development WebStorm instance, open **Settings | Tools | LocaleBreeze** to choose an optional workspace-specific configuration path and, when needed, override the configuration file's unused-key behavior.
+Install a JDK 25 and run `gradlew runIde`. The plugin uses its bundled LocaleBreeze executable and automatically enables itself when it finds `locale-breeze.json`. Open the **LocaleBreeze** tool window on the right to see workspace health, unused-key statistics, and shortcuts to the active configuration and default-locale dictionary. Use **Settings | Tools | LocaleBreeze** to choose an optional workspace-specific configuration path, disable the plugin for the workspace, or override the configuration file's unused-key behavior.
 
 ## Native binaries
 

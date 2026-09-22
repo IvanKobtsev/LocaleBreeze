@@ -29,8 +29,9 @@ class LocaleBreezeLspIntegrationProvider : LspIntegrationProvider {
     ) {
         if (!LocaleBreezeSettings.getInstance(project).state.enabled) return
         if (!isSupported(file)) return
+        project.service<LocaleBreezeWarningCoordinator>().startingIfNeeded()
         if (LocaleBreezeExecutable.resolve(project) == null) {
-            project.service<LocaleBreezeWarningCoordinator>().show(
+            project.service<LocaleBreezeWarningCoordinator>().unavailable(
                 LocaleBreezeWorkspaceIssue(
                     code = "server_missing",
                     summary = "LocaleBreeze language server is missing",
@@ -112,6 +113,11 @@ private class LocaleBreezeLsp4jClient(
         else project.service<LocaleBreezeWarningCoordinator>().clear(
             issue.identity.takeUnless { issue.code == "clear" },
         )
+    }
+
+    @JsonNotification("localeBreeze/workspaceStatus")
+    fun workspaceStatus(status: LocaleBreezeWorkspaceStatus) {
+        project.service<LocaleBreezeWarningCoordinator>().status(status)
     }
 }
 

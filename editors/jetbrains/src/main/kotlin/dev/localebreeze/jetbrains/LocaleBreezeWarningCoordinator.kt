@@ -1,15 +1,16 @@
 package dev.localebreeze.jetbrains
 
-import com.intellij.notification.Notification
 import com.intellij.notification.NotificationAction
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
+import com.intellij.openapi.Disposable
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
-import com.intellij.openapi.fileEditor.OpenFileDescriptor
-import com.intellij.openapi.options.ShowSettingsUtil
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.vfs.LocalFileSystem
+import com.intellij.openapi.util.Disposer
+import com.intellij.openapi.wm.ToolWindowManager
 import java.nio.file.Path
+import java.util.concurrent.CopyOnWriteArrayList
 
 data class LocaleBreezeWorkspaceIssue(
     val version: Int = 1,
@@ -24,60 +25,140 @@ data class LocaleBreezeWorkspaceIssue(
     val identity: String get() = "$code:${path.orEmpty()}"
 }
 
+data class LocaleBreezeWorkspaceStatus(
+    val version: Int = 1,
+    val workspaceRoot: String = "",
+    val configPath: String = "",
+    val defaultLocale: String = "",
+    val defaultDictionaryPath: String? = null,
+    val dictionaryFileCount: Int = 0,
+    val totalKeyCount: Int = 0,
+    val unusedKeyCount: Int = 0,
+    val generation: Long = 0,
+)
+
+enum class LocaleBreezeLifecycle { DISABLED, STARTING, READY, UNAVAILABLE }
+
+data class LocaleBreezeDashboardState(
+    val lifecycle: LocaleBreezeLifecycle,
+    val status: LocaleBreezeWorkspaceStatus? = null,
+    val issues: List<LocaleBreezeWorkspaceIssue> = emptyList(),
+)
+
 @Service(Service.Level.PROJECT)
 class LocaleBreezeWarningCoordinator(private val project: Project) {
-    private var currentIdentity: String? = null
-    private var currentIssue: LocaleBreezeWorkspaceIssue? = null
-    private var current: Notification? = null
+    private val listeners = CopyOnWriteArrayList<() -> Unit>()
+    private val issues = linkedMapOf<String, LocaleBreezeWorkspaceIssue>()
+    private var lifecycle = if (LocaleBreezeSettings.getInstance(project).state.enabled) {
+        LocaleBreezeLifecycle.STARTING
+    } else {
+        LocaleBreezeLifecycle.DISABLED
+    }
+    private var workspaceStatus: LocaleBreezeWorkspaceStatus? = null
+
+    @Synchronized
+    fun snapshot(): LocaleBreezeDashboardState = LocaleBreezeDashboardState(
+        lifecycle = lifecycle,
+        status = workspaceStatus,
+        issues = issues.values.sortedWith(compareBy({ it.path.orEmpty() }, { it.code })),
+    )
+
+    fun addListener(parent: Disposable, listener: () -> Unit) {
+        listeners += listener
+        Disposer.register(parent) { listeners -= listener }
+    }
+
+    @Synchronized
+    fun starting() {
+        issues.clear()
+        workspaceStatus = null
+        lifecycle = LocaleBreezeLifecycle.STARTING
+        changed()
+    }
+
+    @Synchronized
+    fun startingIfNeeded() {
+        if (lifecycle == LocaleBreezeLifecycle.DISABLED || lifecycle == LocaleBreezeLifecycle.UNAVAILABLE) {
+            starting()
+        }
+    }
+
+    @Synchronized
+    fun disabled() {
+        issues.clear()
+        workspaceStatus = null
+        lifecycle = LocaleBreezeLifecycle.DISABLED
+        changed()
+    }
+
+    @Synchronized
+    fun unavailable(issue: LocaleBreezeWorkspaceIssue) {
+        lifecycle = LocaleBreezeLifecycle.UNAVAILABLE
+        addIssue(issue)
+    }
+
+    @Synchronized
+    fun status(status: LocaleBreezeWorkspaceStatus) {
+        if (workspaceStatus?.generation?.let { status.generation < it } == true) return
+        workspaceStatus = status
+        lifecycle = LocaleBreezeLifecycle.READY
+        changed()
+    }
 
     @Synchronized
     fun show(issue: LocaleBreezeWorkspaceIssue) {
         if (!LocaleBreezeSettings.getInstance(project).state.enabled) return
-        if (currentIssue == issue && current?.isExpired == false) return
-        clear()
-        val location = buildString {
-            issue.path?.let { append("<br><code>").append(it).append("</code>") }
-            issue.line?.let {
-                append(" (line ").append(it)
-                issue.column?.let { column -> append(", column ").append(column) }
-                append(")")
-            }
-        }
-        currentIdentity = issue.identity
-        currentIssue = issue
-        current = NotificationGroupManager.getInstance()
-            .getNotificationGroup("LocaleBreeze")
-            .createNotification(
-                issue.summary,
-                issue.remediation + location,
-                NotificationType.WARNING,
-            )
-            .addAction(NotificationAction.createSimpleExpiring("Open Settings") {
-                ShowSettingsUtil.getInstance().showSettingsDialog(project, LocaleBreezeConfigurable::class.java)
-            })
-            .also { notification ->
-                issue.path?.let { value ->
-                    notification.addAction(NotificationAction.createSimpleExpiring("Open File") {
-                        val file = runCatching { Path.of(value) }.getOrNull()
-                            ?.let { LocalFileSystem.getInstance().refreshAndFindFileByNioFile(it) }
-                        if (file != null) OpenFileDescriptor(project, file, (issue.line ?: 1) - 1, (issue.column ?: 1) - 1).navigate(true)
-                    })
-                }
-                notification.notify(project)
-            }
+        if (workspaceStatus == null) lifecycle = LocaleBreezeLifecycle.UNAVAILABLE
+        addIssue(issue)
+    }
+
+    @Synchronized
+    private fun addIssue(issue: LocaleBreezeWorkspaceIssue) {
+        val wasHealthy = issues.isEmpty()
+        if (issues[issue.identity] == issue) return
+        issues[issue.identity] = issue
+        changed()
+        if (wasHealthy) showAttentionNotification(issue.summary)
     }
 
     @Synchronized
     fun clear(identity: String? = null) {
-        if (identity != null && identity != currentIdentity) return
-        current?.expire()
-        current = null
-        currentIdentity = null
-        currentIssue = null
+        val didChange = if (identity == null) {
+            val hadIssues = issues.isNotEmpty()
+            issues.clear()
+            hadIssues
+        } else {
+            issues.remove(identity) != null
+        }
+        if (didChange) changed()
     }
 
     @Synchronized
-    fun concerns(path: String): Boolean = currentIssue?.path?.let {
-        runCatching { Path.of(it).normalize() == Path.of(path).normalize() }.getOrDefault(false)
-    } == true
+    fun concerns(path: String): Boolean = issues.values.any { issue ->
+        issue.path?.let {
+            runCatching { Path.of(it).normalize() == Path.of(path).normalize() }.getOrDefault(false)
+        } == true
+    }
+
+    private fun changed() {
+        ApplicationManager.getApplication().invokeLater {
+            if (!project.isDisposed) listeners.forEach { it() }
+        }
+    }
+
+    private fun showAttentionNotification(summary: String) {
+        ApplicationManager.getApplication().invokeLater {
+            if (project.isDisposed) return@invokeLater
+            NotificationGroupManager.getInstance().getNotificationGroup("LocaleBreeze")
+                .createNotification(
+                    "LocaleBreeze needs attention",
+                    summary,
+                    NotificationType.WARNING,
+                )
+                .addAction(NotificationAction.createSimpleExpiring("Open LocaleBreeze") {
+                    ToolWindowManager.getInstance(project).getToolWindow("LocaleBreeze")?.show(null)
+                })
+                .notify(project)
+        }
+    }
 }

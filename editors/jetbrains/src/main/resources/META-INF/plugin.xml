@@ -3,7 +3,7 @@
   <name>LocaleBreeze</name>
   <vendor url="https://github.com/IvanKobtsev/LocaleBreeze">Ivan Kobtsev</vendor>
   <description><![CDATA[
-    Context-aware i18n completion, navigation, references, and unused-key hints powered by the LocaleBreeze language server.
+    Context-aware i18n completion, navigation, references, unused-key hints, and persistent workspace health powered by the LocaleBreeze language server.
   ]]></description>
 
   <depends>com.intellij.modules.platform</depends>
@@ -27,6 +27,11 @@
         displayName="LocaleBreeze"
         instance="dev.localebreeze.jetbrains.LocaleBreezeConfigurable"/>
     <notificationGroup id="LocaleBreeze" displayType="BALLOON"/>
+    <toolWindow
+        id="LocaleBreeze"
+        anchor="right"
+        icon="/META-INF/pluginIcon.svg"
+        factoryClass="dev.localebreeze.jetbrains.LocaleBreezeToolWindowFactory"/>
   </extensions>
 
   <actions>

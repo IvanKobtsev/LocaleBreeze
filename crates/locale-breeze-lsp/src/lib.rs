@@ -125,6 +125,20 @@ struct WorkspaceIssue {
     column: Option<usize>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceStatus {
+    version: u8,
+    workspace_root: String,
+    config_path: String,
+    default_locale: String,
+    default_dictionary_path: Option<String>,
+    dictionary_file_count: usize,
+    total_key_count: usize,
+    unused_key_count: usize,
+    generation: u64,
+}
+
 impl Server {
     fn new(config_override: Option<PathBuf>, unused_keys_override: Option<bool>) -> Self {
         Self {
@@ -169,6 +183,7 @@ impl Server {
                 publish_workspace_issue(connection, WorkspaceIssue::clear());
                 let workspace = Arc::new(workspace);
                 let watched = workspace.clone();
+                let watched_config_path = config_path.clone();
                 let sender = connection.sender.clone();
                 let published_diagnostics = self.published_diagnostics.clone();
                 let mut watcher_registered = false;
@@ -196,6 +211,10 @@ impl Server {
                             }
                             let _ = sender.send(Message::Notification(notification));
                         }
+                        let _ = sender.send(Message::Notification(Notification::new(
+                            "localeBreeze/workspaceStatus".into(),
+                            WorkspaceStatus::from_workspace(&watched, &watched_config_path),
+                        )));
                     }
                 }) {
                     Ok(mut watcher) => {
@@ -239,6 +258,7 @@ impl Server {
                     .sort_by_key(|w| std::cmp::Reverse(w.root().components().count()));
                 if let Some(workspace) = self.workspace_for_uri(&uri) {
                     publish_diagnostics(connection, workspace, &self.published_diagnostics);
+                    publish_workspace_status(connection, workspace, &config_path);
                 }
             }
             Err(error) => {
@@ -260,6 +280,12 @@ impl Server {
         self.workspaces
             .iter()
             .find(|workspace| workspace.contains_path(&path))
+    }
+
+    fn config_path_for(&self, root: &std::path::Path) -> PathBuf {
+        self.config_override
+            .clone()
+            .unwrap_or_else(|| root.join("locale-breeze.json"))
     }
 
     fn reload_workspaces(&mut self, connection: &Connection) {
@@ -341,6 +367,7 @@ impl Server {
                             Some(p.text_document.version),
                         );
                         publish_diagnostics(connection, w, &self.published_diagnostics);
+                        publish_workspace_status(connection, w, &self.config_path_for(w.root()));
                     }
                 }
             }
@@ -356,6 +383,11 @@ impl Server {
                                 Some(p.text_document.version),
                             );
                             publish_diagnostics(connection, w, &self.published_diagnostics);
+                            publish_workspace_status(
+                                connection,
+                                w,
+                                &self.config_path_for(w.root()),
+                            );
                         }
                     }
                 }
@@ -365,6 +397,7 @@ impl Server {
                     if let Some(w) = self.workspace_for_uri(&p.text_document.uri) {
                         w.close_document(&p.text_document.uri);
                         publish_diagnostics(connection, w, &self.published_diagnostics);
+                        publish_workspace_status(connection, w, &self.config_path_for(w.root()));
                     }
                 }
             }
@@ -375,6 +408,7 @@ impl Server {
                 {
                     w.update_text(p.text_document.uri, text, None);
                     publish_diagnostics(connection, w, &self.published_diagnostics);
+                    publish_workspace_status(connection, w, &self.config_path_for(w.root()));
                 }
             }
             "workspace/didChangeWorkspaceFolders" => {
@@ -1226,6 +1260,68 @@ fn publish_workspace_issue(connection: &Connection, issue: WorkspaceIssue) {
     let _ = connection.sender.send(Message::Notification(notification));
 }
 
+fn publish_workspace_status(
+    connection: &Connection,
+    workspace: &WorkspaceIndex,
+    config_path: &std::path::Path,
+) {
+    let notification = Notification::new(
+        "localeBreeze/workspaceStatus".into(),
+        WorkspaceStatus::from_workspace(workspace, config_path),
+    );
+    let _ = connection.sender.send(Message::Notification(notification));
+}
+
+impl WorkspaceStatus {
+    fn from_workspace(workspace: &WorkspaceIndex, config_path: &std::path::Path) -> Self {
+        let snapshot = workspace.snapshot();
+        let pattern = workspace
+            .config()
+            .dictionary_pattern()
+            .expect("workspace has a validated dictionary pattern");
+        let mut dictionary_paths = snapshot
+            .files
+            .values()
+            .filter_map(|file| file.uri.to_file_path().ok())
+            .filter_map(|path| {
+                pattern
+                    .locale_for(workspace.root(), &path)
+                    .map(|locale| (locale, path))
+            })
+            .collect::<Vec<_>>();
+        dictionary_paths.sort_by(|left, right| left.1.cmp(&right.1));
+        dictionary_paths.dedup_by(|left, right| left.1 == right.1);
+
+        let default_dictionary_path = dictionary_paths
+            .iter()
+            .find(|(locale, _)| locale == &workspace.config().default_locale)
+            .map(|(_, path)| path.display().to_string());
+
+        let mut seen_keys = HashSet::new();
+        let mut unused_key_count = 0;
+        for entry in snapshot.default_locale_leaf_entries(&workspace.config().default_locale) {
+            if seen_keys.insert(entry.key.as_str().to_owned())
+                && !snapshot
+                    .is_leaf_key_used_with_separator(&entry.key, &workspace.config().key_separator)
+            {
+                unused_key_count += 1;
+            }
+        }
+
+        Self {
+            version: 1,
+            workspace_root: workspace.root().display().to_string(),
+            config_path: config_path.display().to_string(),
+            default_locale: workspace.config().default_locale.clone(),
+            default_dictionary_path,
+            dictionary_file_count: dictionary_paths.len(),
+            total_key_count: seen_keys.len(),
+            unused_key_count,
+            generation: snapshot.generation,
+        }
+    }
+}
+
 impl WorkspaceIssue {
     fn clear() -> Self {
         Self {
@@ -1364,6 +1460,50 @@ impl WorkspaceIssue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_status_reports_metrics_when_unused_diagnostics_are_disabled() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("app");
+        let dictionaries = temp.path().join("translations");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(&dictionaries).unwrap();
+        let config_path = root.join("locale-breeze.json");
+        std::fs::write(
+            &config_path,
+            r#"{
+              "dictionaries":"../translations/translation.{locale}.json",
+              "defaultLocale":"en",
+              "scopedFunctions":["useScopedTranslation"],
+              "translationMethods":["t"],
+              "fullKeyFunctions":["i18next.t"],
+              "unusedKeys":false
+            }"#,
+        )
+        .unwrap();
+        let default_dictionary = dictionaries.join("translation.en.json");
+        std::fs::write(&default_dictionary, r#"{"used":"Used","unused":"Unused"}"#).unwrap();
+        std::fs::write(
+            dictionaries.join("translation.fr.json"),
+            r#"{"used":"Utilisé"}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("src/app.ts"), r#"i18next.t("used")"#).unwrap();
+
+        let workspace = WorkspaceIndex::load(root, &config_path).unwrap();
+        let status = WorkspaceStatus::from_workspace(&workspace, &config_path);
+
+        assert_eq!(status.dictionary_file_count, 2);
+        assert_eq!(status.total_key_count, 2);
+        assert_eq!(status.unused_key_count, 1);
+        assert_eq!(status.default_locale, "en");
+        assert_eq!(
+            status.default_dictionary_path,
+            Some(default_dictionary.display().to_string())
+        );
+        assert!(status.generation > 0);
+    }
+
     #[cfg(windows)]
     #[test]
     fn workspace_path_matching_ignores_windows_casing() {
