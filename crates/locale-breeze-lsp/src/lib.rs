@@ -1500,6 +1500,7 @@ mod tests {
         let workspace = Arc::new(workspace);
         let server = Server {
             workspaces: vec![workspace.clone()],
+            workspace_roots: HashSet::new(),
             watchers: vec![],
             config_override: None,
             unused_keys_override: None,
@@ -1602,6 +1603,7 @@ mod tests {
         let uri = Url::from_file_path(dictionary_path).unwrap();
         let server = Server {
             workspaces: vec![Arc::new(workspace)],
+            workspace_roots: HashSet::new(),
             watchers: vec![],
             config_override: None,
             unused_keys_override: None,
@@ -1801,6 +1803,7 @@ mod tests {
         let uri = Url::from_file_path(source_path).unwrap();
         let server = Server {
             workspaces: vec![workspace],
+            workspace_roots: HashSet::new(),
             watchers: vec![],
             config_override: None,
             unused_keys_override: None,
