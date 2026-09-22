@@ -418,26 +418,51 @@ impl WorkspaceIndex {
         Ok(this)
     }
 
-    fn first_dictionary_issue(&self, pattern: &crate::DictionaryPattern) -> Option<DictionaryIssue> {
+    fn first_dictionary_issue(
+        &self,
+        pattern: &crate::DictionaryPattern,
+    ) -> Option<DictionaryIssue> {
         let root = pattern.search_root(&self.root);
         for result in WalkBuilder::new(root).standard_filters(true).build() {
             let entry = result.ok()?;
-            if !entry.file_type().is_some_and(|kind| kind.is_file()) || pattern.locale_for(&self.root, entry.path()).is_none() {
+            if !entry.file_type().is_some_and(|kind| kind.is_file())
+                || pattern.locale_for(&self.root, entry.path()).is_none()
+            {
                 continue;
             }
             let path = entry.path();
             let text = match std::fs::read_to_string(path) {
                 Ok(text) => text,
-                Err(error) => return Some(DictionaryIssue { path: path.to_owned(), message: format!("could not read dictionary: {error}"), line: None, column: None }),
+                Err(error) => {
+                    return Some(DictionaryIssue {
+                        path: path.to_owned(),
+                        message: format!("could not read dictionary: {error}"),
+                        line: None,
+                        column: None,
+                    });
+                }
             };
             let uri = Url::from_file_path(path).ok()?;
             let locale = pattern.locale_for(&self.root, path)?;
-            if let Err(error) = parse_dictionary_ignoring(&uri, &locale, &text, &self.config.key_separator, &|key| self.is_ignored_key(key)) {
+            if let Err(error) = parse_dictionary_ignoring(
+                &uri,
+                &locale,
+                &text,
+                &self.config.key_separator,
+                &|key| self.is_ignored_key(key),
+            ) {
                 let (line, column) = match &error {
-                    crate::DictionaryError::InvalidJson(source) => (Some(source.line()), Some(source.column())),
+                    crate::DictionaryError::InvalidJson(source) => {
+                        (Some(source.line()), Some(source.column()))
+                    }
                     crate::DictionaryError::Parser => (None, None),
                 };
-                return Some(DictionaryIssue { path: path.to_owned(), message: error.to_string(), line, column });
+                return Some(DictionaryIssue {
+                    path: path.to_owned(),
+                    message: error.to_string(),
+                    line,
+                    column,
+                });
             }
         }
         None
@@ -583,19 +608,32 @@ impl WorkspaceIndex {
         let dictionary_issue = pattern.locale_for(&self.root, path).and_then(|locale| {
             let text = match std::fs::read_to_string(path) {
                 Ok(text) => text,
-                Err(error) => return Some(DictionaryIssue {
-                    path: path.to_owned(), message: format!("could not read dictionary: {error}"),
-                    line: None, column: None,
-                }),
+                Err(error) => {
+                    return Some(DictionaryIssue {
+                        path: path.to_owned(),
+                        message: format!("could not read dictionary: {error}"),
+                        line: None,
+                        column: None,
+                    });
+                }
             };
-            parse_dictionary_ignoring(
-                &uri, &locale, &text, &self.config.key_separator, &|key| self.is_ignored_key(key),
-            ).err().map(|error| {
+            parse_dictionary_ignoring(&uri, &locale, &text, &self.config.key_separator, &|key| {
+                self.is_ignored_key(key)
+            })
+            .err()
+            .map(|error| {
                 let (line, column) = match &error {
-                    crate::DictionaryError::InvalidJson(source) => (Some(source.line()), Some(source.column())),
+                    crate::DictionaryError::InvalidJson(source) => {
+                        (Some(source.line()), Some(source.column()))
+                    }
                     crate::DictionaryError::Parser => (None, None),
                 };
-                DictionaryIssue { path: path.to_owned(), message: error.to_string(), line, column }
+                DictionaryIssue {
+                    path: path.to_owned(),
+                    message: error.to_string(),
+                    line,
+                    column,
+                }
             })
         });
         let mut files = current.files.clone();
@@ -1121,7 +1159,10 @@ mod tests {
             temp.path().to_owned(),
             &temp.path().join("locale-breeze.json"),
         );
-        assert!(matches!(result, Err(crate::ConfigError::InvalidDictionary { .. })));
+        assert!(matches!(
+            result,
+            Err(crate::ConfigError::InvalidDictionary { .. })
+        ));
     }
 
     #[test]

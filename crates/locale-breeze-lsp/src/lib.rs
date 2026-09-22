@@ -1,7 +1,7 @@
 use anyhow::Result;
 use locale_breeze_core::{
-    ByteRange, CanonicalKey, ConfigError, DictionaryIssue, EntryKind, IndexSnapshot, LineIndex, OccurrenceKind,
-    WorkspaceIndex,
+    ByteRange, CanonicalKey, ConfigError, DictionaryIssue, EntryKind, IndexSnapshot, LineIndex,
+    OccurrenceKind, WorkspaceIndex,
 };
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::*;
@@ -183,7 +183,8 @@ impl Server {
                                 )));
                             } else if is_dictionary {
                                 let _ = sender.send(Message::Notification(Notification::new(
-                                    "localeBreeze/workspaceIssue".into(), WorkspaceIssue::clear_dictionary(&path),
+                                    "localeBreeze/workspaceIssue".into(),
+                                    WorkspaceIssue::clear_dictionary(&path),
                                 )));
                             }
                         }
@@ -211,7 +212,8 @@ impl Server {
                         }
                     }
                     Err(error) => log(
-                        connection, MessageType::WARNING,
+                        connection,
+                        MessageType::WARNING,
                         format!("LocaleBreeze could not watch {}: {error}", root.display()),
                     ),
                 }
@@ -240,8 +242,15 @@ impl Server {
                 }
             }
             Err(error) => {
-                publish_workspace_issue(connection, WorkspaceIssue::from_config_error(&error, &config_path));
-                log(connection, MessageType::ERROR, format!("LocaleBreeze disabled for {}: {error}", root.display()));
+                publish_workspace_issue(
+                    connection,
+                    WorkspaceIssue::from_config_error(&error, &config_path),
+                );
+                log(
+                    connection,
+                    MessageType::ERROR,
+                    format!("LocaleBreeze disabled for {}: {error}", root.display()),
+                );
             }
         }
     }
@@ -254,7 +263,11 @@ impl Server {
     }
 
     fn reload_workspaces(&mut self, connection: &Connection) {
-        let roots: Vec<_> = self.workspace_roots.iter().filter_map(|root| Url::from_file_path(root).ok()).collect();
+        let roots: Vec<_> = self
+            .workspace_roots
+            .iter()
+            .filter_map(|root| Url::from_file_path(root).ok())
+            .collect();
         for workspace in &self.workspaces {
             clear_diagnostics(connection, workspace, &self.published_diagnostics);
         }
@@ -1319,7 +1332,16 @@ impl WorkspaceIssue {
                 };
             }
         };
-        Self { version: 1, active: true, code, summary, remediation, path, line, column }
+        Self {
+            version: 1,
+            active: true,
+            code,
+            summary,
+            remediation,
+            path,
+            line,
+            column,
+        }
     }
 
     fn from_dictionary_issue(issue: DictionaryIssue) -> Self {
@@ -1328,7 +1350,10 @@ impl WorkspaceIssue {
             active: true,
             code: "dictionary_invalid",
             summary: "LocaleBreeze could not read a dictionary".into(),
-            remediation: format!("{}. Correct the dictionary and save it; LocaleBreeze will refresh automatically.", issue.message),
+            remediation: format!(
+                "{}. Correct the dictionary and save it; LocaleBreeze will refresh automatically.",
+                issue.message
+            ),
             path: Some(issue.path.display().to_string()),
             line: issue.line,
             column: issue.column,

@@ -8,7 +8,9 @@ pub use config::{Config, ConfigError, DictionaryPattern};
 pub use dictionary::{
     DictionaryEntry, DictionaryError, EntryKind, parse_dictionary, parse_dictionary_ignoring,
 };
-pub use index::{CompletionCandidate, CompletionContext, DictionaryIssue, IndexSnapshot, WorkspaceIndex};
+pub use index::{
+    CompletionCandidate, CompletionContext, DictionaryIssue, IndexSnapshot, WorkspaceIndex,
+};
 pub use line_index::LineIndex;
 pub use source::{OccurrenceKind, ScopeBinding, SourceOccurrence, analyze_source};
 
