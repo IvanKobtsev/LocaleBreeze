@@ -17,6 +17,7 @@ class LocaleBreezeSettings : PersistentStateComponent<LocaleBreezeSettings.Data>
         var enablePromptDismissed: Boolean = false,
         var activationMode: String = ActivationMode.AUTO.name,
         var configPath: String = "",
+        var developmentServerPath: String = "",
         var overrideConfig: Boolean = false,
         var showUnusedKeys: Boolean = true,
     )

@@ -37,7 +37,7 @@ data class LocaleBreezeWorkspaceStatus(
     val generation: Long = 0,
 )
 
-enum class LocaleBreezeLifecycle { DISABLED, STARTING, READY, UNAVAILABLE }
+enum class LocaleBreezeLifecycle { DISABLED, WAITING, STARTING, READY, UNAVAILABLE }
 
 data class LocaleBreezeDashboardState(
     val lifecycle: LocaleBreezeLifecycle,
@@ -50,7 +50,7 @@ class LocaleBreezeWarningCoordinator(private val project: Project) {
     private val listeners = CopyOnWriteArrayList<() -> Unit>()
     private val issues = linkedMapOf<String, LocaleBreezeWorkspaceIssue>()
     private var lifecycle = if (LocaleBreezeSettings.getInstance(project).state.enabled) {
-        LocaleBreezeLifecycle.STARTING
+        LocaleBreezeLifecycle.WAITING
     } else {
         LocaleBreezeLifecycle.DISABLED
     }
@@ -78,9 +78,17 @@ class LocaleBreezeWarningCoordinator(private val project: Project) {
 
     @Synchronized
     fun startingIfNeeded() {
-        if (lifecycle == LocaleBreezeLifecycle.DISABLED || lifecycle == LocaleBreezeLifecycle.UNAVAILABLE) {
+        if (lifecycle != LocaleBreezeLifecycle.STARTING && lifecycle != LocaleBreezeLifecycle.READY) {
             starting()
         }
+    }
+
+    @Synchronized
+    fun waiting() {
+        issues.clear()
+        workspaceStatus = null
+        lifecycle = LocaleBreezeLifecycle.WAITING
+        changed()
     }
 
     @Synchronized
@@ -103,6 +111,14 @@ class LocaleBreezeWarningCoordinator(private val project: Project) {
         workspaceStatus = status
         lifecycle = LocaleBreezeLifecycle.READY
         changed()
+    }
+
+    @Synchronized
+    fun ready() {
+        if (lifecycle == LocaleBreezeLifecycle.STARTING || lifecycle == LocaleBreezeLifecycle.WAITING) {
+            lifecycle = LocaleBreezeLifecycle.READY
+            changed()
+        }
     }
 
     @Synchronized

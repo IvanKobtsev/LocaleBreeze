@@ -30,7 +30,7 @@
     <toolWindow
         id="LocaleBreeze"
         anchor="right"
-        icon="/META-INF/pluginIcon.svg"
+        icon="/icons/tool_window_icon/default/localeBreeze.svg"
         factoryClass="dev.localebreeze.jetbrains.LocaleBreezeToolWindowFactory"/>
   </extensions>
 

@@ -46,8 +46,13 @@ class LocaleBreezeProjectActivity : ProjectActivity {
         val shouldEnable = settings.activationMode() == LocaleBreezeSettings.ActivationMode.ENABLED ||
             effectiveConfigPath(project)?.let(Files::isRegularFile) == true
         state.enabled = shouldEnable
-        if (shouldEnable) project.service<LocaleBreezeWarningCoordinator>().starting()
-        else project.service<LocaleBreezeWarningCoordinator>().disabled()
+        if (shouldEnable) {
+            project.service<LocaleBreezeWarningCoordinator>().waiting()
+            LspClientManager.getInstance(project)
+                .startClientsIfNeeded(LocaleBreezeLspIntegrationProvider::class.java)
+        } else {
+            project.service<LocaleBreezeWarningCoordinator>().disabled()
+        }
     }
 
     private fun effectiveConfigPath(project: Project): Path? {

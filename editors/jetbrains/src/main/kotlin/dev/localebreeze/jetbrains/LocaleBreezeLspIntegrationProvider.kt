@@ -31,11 +31,16 @@ class LocaleBreezeLspIntegrationProvider : LspIntegrationProvider {
         if (!isSupported(file)) return
         project.service<LocaleBreezeWarningCoordinator>().startingIfNeeded()
         if (LocaleBreezeExecutable.resolve(project) == null) {
+            val developmentServer = LocaleBreezeExecutable.configuredDevelopmentServer(project)
             project.service<LocaleBreezeWarningCoordinator>().unavailable(
                 LocaleBreezeWorkspaceIssue(
                     code = "server_missing",
                     summary = "LocaleBreeze language server is missing",
-                    remediation = "Reinstall the LocaleBreeze plugin to restore its bundled language-server executable.",
+                    remediation = if (developmentServer == null) {
+                        "Reinstall the LocaleBreeze plugin to restore its bundled language-server executable."
+                    } else {
+                        "Choose an existing development language-server executable in LocaleBreeze settings."
+                    },
                 ),
             )
             return
@@ -90,9 +95,6 @@ private class LocaleBreezeLspClientDescriptor(
         LocaleBreezeExecutable.resolveConfig(project)?.let {
             command.addParameters("--config", it.toString())
         }
-        LocaleBreezeSettings.getInstance(project).state.takeIf { it.overrideConfig }?.let {
-            command.addParameters("--unused-keys", it.showUnusedKeys.toString())
-        }
         log.info(
             "Starting LocaleBreeze language server: project=${project.locationHash}, " +
                 "descriptor=${System.identityHashCode(this)}, executable=$executable",
@@ -129,15 +131,43 @@ private object LocaleBreezeExecutable {
     private val log = Logger.getInstance(LocaleBreezeExecutable::class.java)
 
     fun resolve(project: Project): Path? {
-        val executable = bundledExecutable()
+        val configured = configuredDevelopmentServer(project)
+        val executable = configured ?: bundledExecutable()
         if (executable == null) {
             log.warn("Could not locate the bundled LocaleBreeze executable")
+            return null
+        }
+        if (!Files.isRegularFile(executable)) {
+            log.warn("LocaleBreeze executable does not exist: $executable")
             return null
         }
         if (!SystemInfoRt.isWindows && !executable.toFile().setExecutable(true)) {
             log.warn("Could not mark LocaleBreeze executable as executable: $executable")
         }
         return executable
+    }
+
+    fun configuredDevelopmentServer(project: Project): Path? {
+        if (!LocaleBreezeDevelopment.enabled) return null
+        val configured = LocaleBreezeSettings.getInstance(project).state.developmentServerPath
+        if (configured.isNotBlank()) return resolveProjectPath(project, configured)
+        LocaleBreezeDevelopment.serverPath?.let { return it }
+
+        val executable = executableName()
+        val repositoryRoot = runCatching {
+            Path.of(LocaleBreezeExecutable::class.java.protectionDomain.codeSource.location.toURI())
+        }.getOrNull()?.let { location ->
+            generateSequence(if (Files.isRegularFile(location)) location.parent else location) { it.parent }
+                .take(10)
+                .firstOrNull { candidate ->
+                    Files.isRegularFile(candidate.resolve("Cargo.toml")) &&
+                        Files.isDirectory(candidate.resolve("editors").resolve("jetbrains"))
+                }
+        }
+        return sequenceOf(
+            repositoryRoot?.resolve(Path.of("target", "debug", executable)),
+            project.basePath?.let(Path::of)?.resolve(Path.of("target", "debug", executable)),
+        ).filterNotNull().firstOrNull(Files::isRegularFile)
     }
 
     fun resolveConfig(project: Project): Path? {
@@ -193,4 +223,13 @@ private object LocaleBreezeExecutable {
     }
 
     private fun executableName(): String = if (SystemInfoRt.isWindows) "locale-breeze.exe" else "locale-breeze"
+}
+
+internal object LocaleBreezeDevelopment {
+    private const val PROPERTY = "dev.localebreeze.development"
+    private const val SERVER_PROPERTY = "dev.localebreeze.server"
+    val enabled: Boolean
+        get() = java.lang.Boolean.getBoolean(PROPERTY)
+    val serverPath: Path?
+        get() = System.getProperty(SERVER_PROPERTY)?.takeIf(String::isNotBlank)?.let(Path::of)
 }

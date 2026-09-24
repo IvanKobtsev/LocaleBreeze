@@ -8,7 +8,10 @@ import kotlin.test.assertTrue
 class LocaleBreezeSettingsTest {
     @Test
     fun `workspace is disabled by default`() {
-        assertFalse(LocaleBreezeSettings.Data().enabled)
+        val state = LocaleBreezeSettings.Data()
+
+        assertFalse(state.enabled)
+        assertEquals("", state.developmentServerPath)
     }
 
     @Test

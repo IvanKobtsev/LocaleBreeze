@@ -26,6 +26,27 @@ tasks.withType<KotlinCompile>().configureEach {
     compilerOptions.jvmTarget = JvmTarget.JVM_25
 }
 
+val repositoryRoot = rootProject.layout.projectDirectory.dir("../..")
+val developmentExecutableName = if (System.getProperty("os.name").startsWith("Windows")) {
+    "locale-breeze.exe"
+} else {
+    "locale-breeze"
+}
+val developmentServer = repositoryRoot.file("target/debug/$developmentExecutableName")
+
+val buildDevelopmentServer by tasks.registering(Exec::class) {
+    workingDir(repositoryRoot)
+    commandLine("cargo", "build", "-p", "locale-breeze")
+}
+
+tasks.named<JavaExec>("runIde") {
+    dependsOn(buildDevelopmentServer)
+    jvmArgs(
+        "-Ddev.localebreeze.development=true",
+        "-Ddev.localebreeze.server=${developmentServer.asFile.absolutePath}",
+    )
+}
+
 intellijPlatform {
     pluginConfiguration {
         ideaVersion {
