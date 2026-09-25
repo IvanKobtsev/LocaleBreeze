@@ -95,6 +95,10 @@ private class LocaleBreezeLspClientDescriptor(
         LocaleBreezeExecutable.resolveConfig(project)?.let {
             command.addParameters("--config", it.toString())
         }
+        command.addParameters(
+            "--unused-keys",
+            LocaleBreezePreferences.getInstance().state.showUnusedKeys.toString(),
+        )
         log.info(
             "Starting LocaleBreeze language server: project=${project.locationHash}, " +
                 "descriptor=${System.identityHashCode(this)}, executable=$executable",
@@ -171,7 +175,9 @@ private object LocaleBreezeExecutable {
     }
 
     fun resolveConfig(project: Project): Path? {
-        val configured = LocaleBreezeSettings.getInstance(project).state.configPath
+        val settings = LocaleBreezeSettings.getInstance(project)
+        if (settings.configLocation() == LocaleBreezeSettings.ConfigLocation.WORKSPACE_ROOT) return null
+        val configured = settings.state.configPath
         if (configured.isBlank()) return null
         return resolveProjectPath(project, configured)
     }

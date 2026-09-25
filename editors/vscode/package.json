@@ -48,6 +48,10 @@
         "localeBreeze.configPath": {
           "type": "string", "default": "",
           "description": "Optional configuration path. Relative paths are resolved from the first workspace folder."
+        },
+        "localeBreeze.showUnusedKeys": {
+          "type": "boolean", "default": true,
+          "description": "Fade unused default-locale keys and report them as warnings."
         }
       }
     }

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use locale_breeze_core::{
     ByteRange, CanonicalKey, ConfigError, DictionaryIssue, EntryKind, IndexSnapshot, LineIndex,
-    OccurrenceKind, WorkspaceIndex,
+    OccurrenceKind, WorkspaceIndex, WorkspacePreferences,
 };
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::*;
@@ -19,10 +19,7 @@ const REFRESH_DOCUMENT_COMMAND: &str = "localeBreeze.refreshDocument";
 const DOCUMENT_KEYS_COMMAND: &str = "localeBreeze.documentKeys";
 const PREPARE_ADD_KEY_COMMAND: &str = "localeBreeze.prepareAddKey";
 
-pub fn run_stdio(
-    config_override: Option<PathBuf>,
-    unused_keys_override: Option<bool>,
-) -> Result<()> {
+pub fn run_stdio(config_override: Option<PathBuf>, show_unused_keys: bool) -> Result<()> {
     let (connection, io_threads) = Connection::stdio();
     let capabilities = ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Options(
@@ -62,7 +59,7 @@ pub fn run_stdio(
     };
     let params: InitializeParams =
         serde_json::from_value(connection.initialize(serde_json::to_value(capabilities)?)?)?;
-    let mut server = Server::new(config_override, unused_keys_override);
+    let mut server = Server::new(config_override, show_unused_keys);
     server.initialize(&connection, &params);
     server.event_loop(&connection)?;
     io_threads.join()?;
@@ -74,7 +71,7 @@ struct Server {
     workspace_roots: HashSet<PathBuf>,
     watchers: Vec<RecommendedWatcher>,
     config_override: Option<PathBuf>,
-    unused_keys_override: Option<bool>,
+    preferences: WorkspacePreferences,
     published_diagnostics: Arc<Mutex<HashMap<Url, Vec<Diagnostic>>>>,
 }
 
@@ -140,13 +137,13 @@ struct WorkspaceStatus {
 }
 
 impl Server {
-    fn new(config_override: Option<PathBuf>, unused_keys_override: Option<bool>) -> Self {
+    fn new(config_override: Option<PathBuf>, show_unused_keys: bool) -> Self {
         Self {
             workspaces: vec![],
             workspace_roots: HashSet::new(),
             watchers: vec![],
             config_override,
-            unused_keys_override,
+            preferences: WorkspacePreferences { show_unused_keys },
             published_diagnostics: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -174,11 +171,7 @@ impl Server {
             .config_override
             .clone()
             .unwrap_or_else(|| root.join("locale-breeze.json"));
-        match WorkspaceIndex::load_with_unused_override(
-            root.clone(),
-            &config_path,
-            self.unused_keys_override,
-        ) {
+        match WorkspaceIndex::load_with_preferences(root.clone(), &config_path, self.preferences) {
             Ok(workspace) => {
                 publish_workspace_issue(connection, WorkspaceIssue::clear());
                 let workspace = Arc::new(workspace);
@@ -1121,7 +1114,7 @@ fn diagnostic_notifications(
         }
     }
     for entry in snapshot.default_locale_leaf_entries(&workspace.config().default_locale) {
-        if workspace.config().unused_keys
+        if workspace.preferences().show_unused_keys
             && !snapshot
                 .is_leaf_key_used_with_separator(&entry.key, &workspace.config().key_separator)
             && let Some(range) = location(&snapshot, &entry.uri, &entry.key_range).map(|l| l.range)
@@ -1476,8 +1469,7 @@ mod tests {
               "defaultLocale":"en",
               "scopedFunctions":["useScopedTranslation"],
               "translationMethods":["t"],
-              "fullKeyFunctions":["i18next.t"],
-              "unusedKeys":false
+              "fullKeyFunctions":["i18next.t"]
             }"#,
         )
         .unwrap();
@@ -1541,8 +1533,7 @@ mod tests {
               "keySeparator":".",
               "scopedFunctions":["useScopedTranslation"],
               "translationMethods":["t"],
-              "fullKeyFunctions":["i18next.t"],
-              "unusedKeys":true
+              "fullKeyFunctions":["i18next.t"]
             }"#,
         )
         .unwrap();
@@ -1643,7 +1634,7 @@ mod tests {
             workspace_roots: HashSet::new(),
             watchers: vec![],
             config_override: None,
-            unused_keys_override: None,
+            preferences: WorkspacePreferences::default(),
             published_diagnostics: Default::default(),
         };
         let hover_at = |line, character| {
@@ -1746,7 +1737,7 @@ mod tests {
             workspace_roots: HashSet::new(),
             watchers: vec![],
             config_override: None,
-            unused_keys_override: None,
+            preferences: WorkspacePreferences::default(),
             published_diagnostics: Default::default(),
         };
         let result = server
@@ -1766,7 +1757,7 @@ mod tests {
     }
 
     #[test]
-    fn unused_key_override_takes_precedence_only_when_supplied() {
+    fn runtime_preferences_control_unused_key_diagnostics() {
         let temp = tempfile::tempdir().unwrap();
         let config_path = temp.path().join("locale-breeze.json");
         std::fs::write(
@@ -1776,8 +1767,7 @@ mod tests {
               "defaultLocale":"en",
               "scopedFunctions":["useScopedTranslation"],
               "translationMethods":["t"],
-              "fullKeyFunctions":["i18next.t"],
-              "unusedKeys":false
+              "fullKeyFunctions":["i18next.t"]
             }"#,
         )
         .unwrap();
@@ -1787,14 +1777,16 @@ mod tests {
         )
         .unwrap();
         let configured = WorkspaceIndex::load(temp.path().to_owned(), &config_path).unwrap();
-        assert!(!configured.config().unused_keys);
-        let overridden = WorkspaceIndex::load_with_unused_override(
+        assert!(configured.preferences().show_unused_keys);
+        let hidden = WorkspaceIndex::load_with_preferences(
             temp.path().to_owned(),
             &config_path,
-            Some(true),
+            WorkspacePreferences {
+                show_unused_keys: false,
+            },
         )
         .unwrap();
-        assert!(overridden.config().unused_keys);
+        assert!(!hidden.preferences().show_unused_keys);
     }
 
     #[test]
@@ -1905,7 +1897,6 @@ mod tests {
               "scopedFunctions":["useScopedTranslation"],
               "translationMethods":["t"],
               "fullKeyFunctions":["i18next.t"],
-              "unusedKeys":false,
               "ignoredScopes":["Server_Errors"]
             }"#,
         )
@@ -1923,9 +1914,12 @@ mod tests {
         );
         std::fs::write(&source_path, source).unwrap();
         let workspace = Arc::new(
-            WorkspaceIndex::load(
+            WorkspaceIndex::load_with_preferences(
                 temp.path().to_owned(),
                 &temp.path().join("locale-breeze.json"),
+                WorkspacePreferences {
+                    show_unused_keys: false,
+                },
             )
             .unwrap(),
         );
@@ -1946,7 +1940,7 @@ mod tests {
             workspace_roots: HashSet::new(),
             watchers: vec![],
             config_override: None,
-            unused_keys_override: None,
+            preferences: WorkspacePreferences::default(),
             published_diagnostics: Default::default(),
         };
         let position = Position::new(0, source.find("Server_Errors").unwrap() as u32 + 2);

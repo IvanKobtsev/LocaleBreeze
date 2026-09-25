@@ -10,6 +10,7 @@ pub use dictionary::{
 };
 pub use index::{
     CompletionCandidate, CompletionContext, DictionaryIssue, IndexSnapshot, WorkspaceIndex,
+    WorkspacePreferences,
 };
 pub use line_index::LineIndex;
 pub use source::{OccurrenceKind, ScopeBinding, SourceOccurrence, analyze_source};

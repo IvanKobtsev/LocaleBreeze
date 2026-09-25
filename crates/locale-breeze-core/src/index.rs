@@ -360,8 +360,22 @@ fn match_score(query: &str, haystack: &str, insert: &str) -> Option<i64> {
 pub struct WorkspaceIndex {
     root: PathBuf,
     config: Config,
+    preferences: WorkspacePreferences,
     ignored_scopes: HashSet<String>,
     snapshot: ArcSwap<IndexSnapshot>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkspacePreferences {
+    pub show_unused_keys: bool,
+}
+
+impl Default for WorkspacePreferences {
+    fn default() -> Self {
+        Self {
+            show_unused_keys: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -374,22 +388,20 @@ pub struct DictionaryIssue {
 
 impl WorkspaceIndex {
     pub fn load(root: PathBuf, config_path: &Path) -> Result<Self, crate::ConfigError> {
-        Self::load_with_unused_override(root, config_path, None)
+        Self::load_with_preferences(root, config_path, WorkspacePreferences::default())
     }
 
-    pub fn load_with_unused_override(
+    pub fn load_with_preferences(
         root: PathBuf,
         config_path: &Path,
-        unused_keys_override: Option<bool>,
+        preferences: WorkspacePreferences,
     ) -> Result<Self, crate::ConfigError> {
-        let mut config = Config::load(config_path)?;
-        if let Some(value) = unused_keys_override {
-            config.unused_keys = value;
-        }
+        let config = Config::load(config_path)?;
         let ignored_scopes = config.ignored_scope_set();
         let this = Self {
             root,
             config,
+            preferences,
             ignored_scopes,
             snapshot: ArcSwap::from_pointee(IndexSnapshot::default()),
         };
@@ -473,6 +485,9 @@ impl WorkspaceIndex {
     }
     pub fn config(&self) -> &Config {
         &self.config
+    }
+    pub fn preferences(&self) -> WorkspacePreferences {
+        self.preferences
     }
     pub fn dictionary_root(&self) -> PathBuf {
         self.config

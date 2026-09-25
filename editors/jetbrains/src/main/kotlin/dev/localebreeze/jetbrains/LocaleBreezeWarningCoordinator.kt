@@ -3,11 +3,13 @@ package dev.localebreeze.jetbrains
 import com.intellij.notification.NotificationAction
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
+import com.intellij.icons.AllIcons
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Disposer
+import com.intellij.openapi.util.IconLoader
 import com.intellij.openapi.wm.ToolWindowManager
 import java.nio.file.Path
 import java.util.concurrent.CopyOnWriteArrayList
@@ -41,6 +43,7 @@ enum class LocaleBreezeLifecycle { DISABLED, WAITING, STARTING, READY, UNAVAILAB
 
 data class LocaleBreezeDashboardState(
     val lifecycle: LocaleBreezeLifecycle,
+    val setup: LocaleBreezeConfigSetupState,
     val status: LocaleBreezeWorkspaceStatus? = null,
     val issues: List<LocaleBreezeWorkspaceIssue> = emptyList(),
 )
@@ -55,10 +58,14 @@ class LocaleBreezeWarningCoordinator(private val project: Project) {
         LocaleBreezeLifecycle.DISABLED
     }
     private var workspaceStatus: LocaleBreezeWorkspaceStatus? = null
+    private var setupState: LocaleBreezeConfigSetupState = LocaleBreezeConfigSetupState.NotFound
+    private val normalToolIcon = IconLoader.getIcon("/icons/tool_window_icon/default/localeBreeze.svg", javaClass)
+    private val fadedToolIcon = IconLoader.getIcon("/icons/tool_window_icon/disabled/localeBreeze.svg", javaClass)
 
     @Synchronized
     fun snapshot(): LocaleBreezeDashboardState = LocaleBreezeDashboardState(
         lifecycle = lifecycle,
+        setup = setupState,
         status = workspaceStatus,
         issues = issues.values.sortedWith(compareBy({ it.path.orEmpty() }, { it.code })),
     )
@@ -66,6 +73,13 @@ class LocaleBreezeWarningCoordinator(private val project: Project) {
     fun addListener(parent: Disposable, listener: () -> Unit) {
         listeners += listener
         Disposer.register(parent) { listeners -= listener }
+    }
+
+    @Synchronized
+    fun setup(state: LocaleBreezeConfigSetupState) {
+        if (setupState == state) return
+        setupState = state
+        changed()
     }
 
     @Synchronized
@@ -158,7 +172,16 @@ class LocaleBreezeWarningCoordinator(private val project: Project) {
 
     private fun changed() {
         ApplicationManager.getApplication().invokeLater {
-            if (!project.isDisposed) listeners.forEach { it() }
+            if (project.isDisposed) return@invokeLater
+            val state = snapshot()
+            ToolWindowManager.getInstance(project).getToolWindow("LocaleBreeze")?.setIcon(
+                when {
+                    state.issues.isNotEmpty() -> AllIcons.General.Warning
+                    !LocaleBreezeSettings.getInstance(project).isEnabledInSettings() -> fadedToolIcon
+                    else -> normalToolIcon
+                },
+            )
+            listeners.forEach { it() }
         }
     }
 

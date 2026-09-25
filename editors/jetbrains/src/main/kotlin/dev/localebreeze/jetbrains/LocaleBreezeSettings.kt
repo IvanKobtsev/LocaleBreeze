@@ -6,6 +6,7 @@ import com.intellij.openapi.components.State
 import com.intellij.openapi.components.Storage
 import com.intellij.openapi.components.StoragePathMacros
 import com.intellij.openapi.components.service
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.Project
 
 @Service(Service.Level.PROJECT)
@@ -16,6 +17,7 @@ class LocaleBreezeSettings : PersistentStateComponent<LocaleBreezeSettings.Data>
         var enabled: Boolean = false,
         var enablePromptDismissed: Boolean = false,
         var activationMode: String = ActivationMode.AUTO.name,
+        var configLocation: String = ConfigLocation.WORKSPACE_ROOT.name,
         var configPath: String = "",
         var developmentServerPath: String = "",
         var overrideConfig: Boolean = false,
@@ -23,16 +25,29 @@ class LocaleBreezeSettings : PersistentStateComponent<LocaleBreezeSettings.Data>
     )
 
     enum class ActivationMode { AUTO, ENABLED, DISABLED }
+    enum class ConfigLocation { WORKSPACE_ROOT, CUSTOM_PATH }
 
     private var data = Data(schemaVersion = CURRENT_SCHEMA_VERSION)
 
     override fun getState(): Data = data
 
     override fun loadState(state: Data) {
-        if (state.schemaVersion < CURRENT_SCHEMA_VERSION) {
+        ApplicationManager.getApplication()
+            ?.getService(LocaleBreezePreferences::class.java)
+            ?.migrateLegacyPreference(state.overrideConfig, state.showUnusedKeys)
+        if (state.schemaVersion < 1) {
             state.activationMode = if (state.enabled) ActivationMode.ENABLED.name else ActivationMode.AUTO.name
-            state.schemaVersion = CURRENT_SCHEMA_VERSION
         }
+        if (state.schemaVersion < 3) {
+            state.configLocation = if (state.configPath.isBlank()) {
+                ConfigLocation.WORKSPACE_ROOT.name
+            } else {
+                ConfigLocation.CUSTOM_PATH.name
+            }
+        }
+        state.schemaVersion = CURRENT_SCHEMA_VERSION
+        state.overrideConfig = false
+        state.showUnusedKeys = true
         data = state
     }
 
@@ -41,11 +56,17 @@ class LocaleBreezeSettings : PersistentStateComponent<LocaleBreezeSettings.Data>
 
     fun setActivationMode(mode: ActivationMode) {
         data.activationMode = mode.name
-        data.enabled = mode == ActivationMode.ENABLED || (mode == ActivationMode.AUTO && data.enabled)
+        if (mode == ActivationMode.DISABLED) data.enabled = false
     }
 
+    fun isEnabledInSettings(): Boolean =
+        activationMode() == ActivationMode.ENABLED || data.enabled
+
+    fun configLocation(): ConfigLocation =
+        runCatching { ConfigLocation.valueOf(data.configLocation) }.getOrDefault(ConfigLocation.WORKSPACE_ROOT)
+
     companion object {
-        private const val CURRENT_SCHEMA_VERSION = 1
+        private const val CURRENT_SCHEMA_VERSION = 3
         fun getInstance(project: Project): LocaleBreezeSettings = project.service()
     }
 }

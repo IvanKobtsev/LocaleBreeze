@@ -1,10 +1,11 @@
 package dev.localebreeze.jetbrains
 
-import com.intellij.codeInsight.daemon.DaemonCodeAnalyzer
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.components.service
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
+import com.intellij.openapi.fileChooser.FileChooser
+import com.intellij.openapi.fileChooser.FileChooserDescriptor
 import com.intellij.openapi.options.ShowSettingsUtil
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.IconLoader
@@ -12,7 +13,6 @@ import com.intellij.openapi.util.text.StringUtil
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
-import com.intellij.platform.lsp.api.LspClientManager
 import com.intellij.ui.JBColor
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBScrollPane
@@ -33,6 +33,7 @@ import java.nio.file.Path
 import javax.swing.Box
 import javax.swing.BoxLayout
 import javax.swing.JButton
+import javax.swing.JComboBox
 import javax.swing.JComponent
 import javax.swing.JPanel
 import javax.swing.JProgressBar
@@ -74,11 +75,12 @@ private class LocaleBreezeToolWindowPanel(
 
     private fun render() {
         val state = model.snapshot()
+        val setupEnabled = LocaleBreezeSettings.getInstance(project).isEnabledInSettings()
         body.removeAll()
 
         if (state.issues.isNotEmpty())
             toolWindow.setIcon(AllIcons.General.Warning)
-        else if (state.lifecycle == LocaleBreezeLifecycle.DISABLED)
+        else if (!setupEnabled)
             toolWindow.setIcon(fadedToolIcon)
         else toolWindow.setIcon(normalToolIcon)
 
@@ -86,6 +88,10 @@ private class LocaleBreezeToolWindowPanel(
         body.add(Box.createVerticalStrut(40))
 
         when {
+            state.lifecycle == LocaleBreezeLifecycle.DISABLED && !setupEnabled -> renderDisabled()
+            state.setup == LocaleBreezeConfigSetupState.Searching -> renderConfigSearching()
+            state.setup is LocaleBreezeConfigSetupState.Candidates -> renderConfigCandidates(state.setup)
+            state.setup == LocaleBreezeConfigSetupState.NotFound -> renderConfigNotFound()
             state.issues.isNotEmpty() -> renderProblems(state)
             state.lifecycle == LocaleBreezeLifecycle.DISABLED -> renderDisabled()
             state.lifecycle == LocaleBreezeLifecycle.WAITING -> renderWaiting()
@@ -99,9 +105,84 @@ private class LocaleBreezeToolWindowPanel(
         body.repaint()
     }
 
+    private fun renderConfigSearching() {
+        heading("Looking for a configuration…")
+        paragraph("LocaleBreeze is searching indexed project files.")
+        body.add(JProgressBar().apply { isIndeterminate = true; alignmentX = Component.LEFT_ALIGNMENT })
+    }
+
+    private fun renderConfigCandidates(setup: LocaleBreezeConfigSetupState.Candidates) {
+        heading(if (setup.paths.size == 1) "Configuration found" else "Choose a configuration")
+        if (setup.paths.size == 1) {
+            val path = setup.paths.single()
+            paragraph(relativePath(path))
+            body.add(actionRow(
+                JButton("Use this config").apply { addActionListener { useConfig(path) } },
+                JButton("Create new").apply { addActionListener { createRootConfig() } },
+                JButton("Choose existing…").apply { addActionListener { chooseExistingConfig() } },
+            ))
+        } else {
+            paragraph("LocaleBreeze found ${setup.paths.size} configuration files in this project.")
+            val selector = JComboBox(setup.paths.map(::relativePath).toTypedArray()).apply {
+                alignmentX = Component.LEFT_ALIGNMENT
+                maximumSize = Dimension(Int.MAX_VALUE, preferredSize.height)
+            }
+            body.add(selector)
+            body.add(Box.createVerticalStrut(8))
+            body.add(actionRow(
+                JButton("Use selected config").apply {
+                    addActionListener { useConfig(setup.paths[selector.selectedIndex]) }
+                },
+                JButton("Create new").apply { addActionListener { createRootConfig() } },
+                JButton("Choose existing…").apply { addActionListener { chooseExistingConfig() } },
+            ))
+        }
+    }
+
+    private fun renderConfigNotFound() {
+        heading("Configuration not found")
+        paragraph("No configuration file exists at the location selected in LocaleBreeze settings.")
+        body.add(actionRow(
+            JButton("Create new").apply { addActionListener { createRootConfig() } },
+            JButton("Choose existing…").apply { addActionListener { chooseExistingConfig() } },
+            JButton("Open settings…").apply {
+                addActionListener {
+                    ShowSettingsUtil.getInstance().showSettingsDialog(project, LocaleBreezeConfigurable::class.java)
+                }
+            },
+        ))
+    }
+
+    private fun createRootConfig() {
+        project.service<LocaleBreezeConfigDiscovery>().createRootConfig()
+    }
+
+    private fun useConfig(path: String) {
+        project.service<LocaleBreezeConfigDiscovery>().applySelectedConfig(Path.of(path))
+    }
+
+    private fun relativePath(value: String): String {
+        val path = Path.of(value).toAbsolutePath().normalize()
+        val root = project.basePath?.let(Path::of)?.toAbsolutePath()?.normalize() ?: return value
+        return runCatching { root.relativize(path).toString() }.getOrDefault(value)
+    }
+
+    private fun chooseExistingConfig() {
+        val descriptor = FileChooserDescriptor(true, false, false, false, false, false)
+            .withTitle("Choose LocaleBreeze Configuration")
+            .withFileFilter { it.name == LocaleBreezeConfigDiscovery.CONFIG_FILE_NAME || it.extension.equals("json", true) }
+        FileChooser.chooseFile(descriptor, project, null) { file ->
+            project.service<LocaleBreezeConfigDiscovery>().applySelectedConfig(file.toNioPath())
+        }
+    }
+
+    private fun actionRow(vararg components: JComponent): JComponent = row(*components).apply {
+        alignmentX = Component.LEFT_ALIGNMENT
+    }
+
     private fun renderDisabled() {
-        heading("LocaleBreeze is disabled")
-        paragraph("Enable LocaleBreeze to index translations and show workspace health.")
+        heading("LocaleBreeze is disabled in this workspace")
+        paragraph("Enable LocaleBreeze to find a configuration and start indexing translations.")
     }
 
     private fun renderStarting() {
@@ -168,8 +249,13 @@ private class LocaleBreezeToolWindowPanel(
 
     private fun toolBar(state: LocaleBreezeDashboardState): JComponent = JPanel(BorderLayout()).apply {
         val lifecycle = state.lifecycle
+        val enabledInSettings = LocaleBreezeSettings.getInstance(project).isEnabledInSettings()
         val dictionaryPath = state.status?.defaultDictionaryPath
-        val configPath = state.status?.configPath
+        val configPath = when (val setup = state.setup) {
+            is LocaleBreezeConfigSetupState.Configured -> setup.path
+            is LocaleBreezeConfigSetupState.RootConfig -> setup.path
+            else -> null
+        }
         alignmentX = Component.LEFT_ALIGNMENT
         maximumSize = Dimension(Int.MAX_VALUE, JBUI.scale(30))
         isOpaque = false
@@ -185,36 +271,23 @@ private class LocaleBreezeToolWindowPanel(
             iconButton(settingsIcon, "Open LocaleBreeze settings") {
                 ShowSettingsUtil.getInstance().showSettingsDialog(project, LocaleBreezeConfigurable::class.java)
             },
-            iconButton(restartIcon, "Refresh", lifecycle != LocaleBreezeLifecycle.DISABLED) { refresh() },
-            iconButton(powerIcon, if (lifecycle == LocaleBreezeLifecycle.DISABLED) "Enable" else "Disable") {
-                setPluginEnabled(lifecycle == LocaleBreezeLifecycle.DISABLED)
+            iconButton(restartIcon, "Refresh", enabledInSettings) { refresh() },
+            iconButton(powerIcon, if (enabledInSettings) "Disable" else "Enable") {
+                setPluginEnabled(!enabledInSettings)
             },
         ), BorderLayout.EAST)
     }
 
     private fun refresh() {
-        model.starting()
-        LspClientManager.getInstance(project)
-            .stopAndRestartClientsIfNeeded(LocaleBreezeLspIntegrationProvider::class.java)
-        project.service<LocaleBreezeKeyCache>().invalidate()
-        DaemonCodeAnalyzer.getInstance(project).restart()
+        project.service<LocaleBreezeConfigDiscovery>().refresh(true)
     }
 
     private fun setPluginEnabled(value: Boolean) {
-        val settings = LocaleBreezeSettings.getInstance(project)
-        settings.setActivationMode(
-            if (value) LocaleBreezeSettings.ActivationMode.ENABLED
-            else LocaleBreezeSettings.ActivationMode.DISABLED,
-        )
-        settings.state.enabled = value
-        if (value) model.waiting() else model.disabled()
-        val lspClients = LspClientManager.getInstance(project)
-        lspClients.stopAndRestartClientsIfNeeded(LocaleBreezeLspIntegrationProvider::class.java)
         if (value) {
-            lspClients.startClientsIfNeeded(LocaleBreezeLspIntegrationProvider::class.java)
+            project.service<LocaleBreezeConfigDiscovery>().enableAndDiscover()
+            return
         }
-        project.service<LocaleBreezeKeyCache>().invalidate()
-        DaemonCodeAnalyzer.getInstance(project).restart()
+        project.service<LocaleBreezeConfigDiscovery>().leaveDisabled()
     }
 
     private fun openPath(value: String, line: Int? = null, column: Int? = null) {

@@ -18,6 +18,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const args = ['lsp', '--stdio'];
   const config = resolveConfig(settings.get<string>('configPath', '').trim());
   if (config) args.push('--config', config);
+  args.push('--unused-keys', String(settings.get<boolean>('showUnusedKeys', true)));
   const serverOptions: ServerOptions = { command: executable, args, options: { cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath } };
   const configWatcher = vscode.workspace.createFileSystemWatcher('**/locale-breeze.json');
   context.subscriptions.push(configWatcher);
@@ -56,6 +57,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const trace = settings.get<string>('server.trace', 'off');
   client.setTrace(trace === 'verbose' ? Trace.Verbose : trace === 'messages' ? Trace.Messages : Trace.Off);
   await client.start();
+  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
+    if (!event.affectsConfiguration('localeBreeze.showUnusedKeys')) return;
+    args[args.indexOf('--unused-keys') + 1] = String(
+      vscode.workspace.getConfiguration('localeBreeze').get<boolean>('showUnusedKeys', true)
+    );
+    void client?.restart();
+  }));
   context.subscriptions.push({ dispose: () => void client?.stop() });
 }
 

@@ -15,7 +15,6 @@
     "fullKeyFunctions": { "$ref": "#/$defs/conventions" },
     "translationKeyTypes": { "$ref": "#/$defs/optionalConventions" },
     "translationKeyProps": { "$ref": "#/$defs/optionalConventions" },
-    "unusedKeys": { "type": "boolean", "default": false },
     "ignoredScopes": {
       "type": "array",
       "default": [],

@@ -54,8 +54,9 @@ class LocaleBreezeCopyFullKeyAction : AnAction() {
     }
 
     private fun keySeparator(project: Project): String {
-        val configured = LocaleBreezeSettings.getInstance(project).state.configPath
-        val path = if (configured.isBlank()) {
+        val settings = LocaleBreezeSettings.getInstance(project)
+        val configured = settings.state.configPath
+        val path = if (settings.configLocation() == LocaleBreezeSettings.ConfigLocation.WORKSPACE_ROOT) {
             project.basePath?.let(Path::of)?.resolve("locale-breeze.json")
         } else {
             Path.of(configured).let { configuredPath ->

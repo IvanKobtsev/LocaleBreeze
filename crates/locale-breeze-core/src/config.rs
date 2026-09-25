@@ -21,8 +21,6 @@ pub struct Config {
     #[serde(default)]
     pub translation_key_props: Vec<String>,
     #[serde(default)]
-    pub unused_keys: bool,
-    #[serde(default)]
     pub ignored_scopes: Vec<String>,
 }
 
@@ -266,6 +264,19 @@ mod tests {
         }))
         .unwrap();
         assert!(config.ignored_scopes.is_empty());
+    }
+
+    #[test]
+    fn rejects_removed_unused_keys_setting() {
+        let result = serde_json::from_value::<Config>(serde_json::json!({
+            "dictionaries": "translation.{locale}.json",
+            "defaultLocale": "en",
+            "scopedFunctions": ["useScopedTranslation"],
+            "translationMethods": ["t"],
+            "fullKeyFunctions": ["i18next.t"],
+            "unusedKeys": true
+        }));
+        assert!(result.is_err());
     }
 
     #[test]

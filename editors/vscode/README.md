@@ -15,6 +15,8 @@ LocaleBreeze provides context-aware completion and navigation for JSON translati
 
 Create `locale-breeze.json` in the workspace root. See the [project documentation](https://github.com/IvanKobtsev/LocaleBreeze) for configuration and supported source patterns.
 
+Unused-key hints are enabled by default. Set `localeBreeze.showUnusedKeys` to `false` in user settings to hide them.
+
 The extension runs entirely on the local machine. It contains no telemetry and sends no project data over the network.
 
 ## Support
