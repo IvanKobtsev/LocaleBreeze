@@ -139,7 +139,7 @@ class LocaleBreezeConfigDiscovery(private val project: Project) {
         val settings = LocaleBreezeSettings.getInstance(project)
         settings.setActivationMode(LocaleBreezeSettings.ActivationMode.ENABLED)
         settings.state.enabled = false
-        refresh()
+        refresh(restartConfigured = true)
     }
 
     fun normalizeForStorage(value: String): String {

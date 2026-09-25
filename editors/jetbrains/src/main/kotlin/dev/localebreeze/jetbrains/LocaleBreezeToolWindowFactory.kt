@@ -18,6 +18,7 @@ import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.content.ContentFactory
 import com.intellij.util.ui.JBUI
+import com.intellij.util.ui.UIUtil
 import java.awt.AlphaComposite
 import java.awt.BorderLayout
 import java.awt.Color
@@ -37,7 +38,9 @@ import javax.swing.JComboBox
 import javax.swing.JComponent
 import javax.swing.JPanel
 import javax.swing.JProgressBar
+import javax.swing.JSeparator
 import javax.swing.Scrollable
+import javax.swing.SwingUtilities
 import javax.swing.JTextArea
 
 class LocaleBreezeToolWindowFactory : ToolWindowFactory {
@@ -54,7 +57,8 @@ private class LocaleBreezeToolWindowPanel(
     private val toolWindow: ToolWindow,
 ) : Disposable {
     private val body = ToolWindowBody()
-    val component: JComponent = JBScrollPane(body).apply { border = JBUI.Borders.empty() }
+    private val scrollPane = JBScrollPane(body).apply { border = JBUI.Borders.empty() }
+    val component: JComponent = scrollPane
     private val model = project.service<LocaleBreezeWarningCoordinator>()
     private val normalToolIcon = IconLoader.getIcon("/icons/tool_window_icon/default/localeBreeze.svg", javaClass)
     private val fadedToolIcon = IconLoader.getIcon("/icons/tool_window_icon/disabled/localeBreeze.svg", javaClass)
@@ -63,6 +67,8 @@ private class LocaleBreezeToolWindowPanel(
     private val settingsIcon = IconLoader.getIcon("/icons/settings_icon/localeBreeze.svg", javaClass)
     private val powerIcon = IconLoader.getIcon("/icons/power_icon/localeBreeze.svg", javaClass)
     private val restartIcon = IconLoader.getIcon("/icons/restart_icon/localeBreeze.svg", javaClass)
+    private val sleepPluginIcon = IconLoader.getIcon("/icons/sleep_picture/localeBreeze.svg", javaClass)
+    private val accentColor = JBColor(Color(0x3574F0), Color(0x3574F0))
 
     init {
         body.layout = BoxLayout(body, BoxLayout.Y_AXIS)
@@ -85,7 +91,12 @@ private class LocaleBreezeToolWindowPanel(
         else toolWindow.setIcon(normalToolIcon)
 
         body.add(toolBar(state))
-        body.add(Box.createVerticalStrut(40))
+        body.add(Box.createVerticalStrut(10))
+        body.add(JSeparator().apply {
+            alignmentX = Component.LEFT_ALIGNMENT
+            maximumSize = Dimension(Int.MAX_VALUE, preferredSize.height)
+        })
+        body.add(Box.createVerticalStrut(28))
 
         when {
             state.lifecycle == LocaleBreezeLifecycle.DISABLED && !setupEnabled -> renderDisabled()
@@ -101,56 +112,68 @@ private class LocaleBreezeToolWindowPanel(
         }
 
         body.add(Box.createVerticalGlue())
+        body.invalidate()
         body.revalidate()
         body.repaint()
+        scrollPane.viewport.invalidate()
+        scrollPane.viewport.revalidate()
+        component.revalidate()
+        component.repaint()
+        SwingUtilities.invokeLater {
+            if (project.isDisposed) return@invokeLater
+            body.invalidate()
+            body.revalidate()
+            scrollPane.viewport.revalidate()
+            component.repaint()
+        }
     }
 
     private fun renderConfigSearching() {
-        heading("Looking for a configuration…")
-        paragraph("LocaleBreeze is searching indexed project files.")
-        body.add(JProgressBar().apply { isIndeterminate = true; alignmentX = Component.LEFT_ALIGNMENT })
+        infoCard("Looking for a configuration…", "LocaleBreeze is searching indexed project files.") {
+            add(JProgressBar().apply { isIndeterminate = true; alignmentX = Component.LEFT_ALIGNMENT })
+        }
     }
 
     private fun renderConfigCandidates(setup: LocaleBreezeConfigSetupState.Candidates) {
-        heading(if (setup.paths.size == 1) "Configuration found" else "Choose a configuration")
         if (setup.paths.size == 1) {
             val path = setup.paths.single()
-            paragraph(relativePath(path))
-            body.add(actionRow(
-                JButton("Use this config").apply { addActionListener { useConfig(path) } },
-                JButton("Create new").apply { addActionListener { createRootConfig() } },
-                JButton("Choose existing…").apply { addActionListener { chooseExistingConfig() } },
-            ))
-        } else {
-            paragraph("LocaleBreeze found ${setup.paths.size} configuration files in this project.")
-            val selector = JComboBox(setup.paths.map(::relativePath).toTypedArray()).apply {
-                alignmentX = Component.LEFT_ALIGNMENT
-                maximumSize = Dimension(Int.MAX_VALUE, preferredSize.height)
+            infoCard("Configuration found", relativePath(path)) {
+                add(actionRow(
+                    cardButton("Use this config", primary = true) { useConfig(path) },
+                    cardButton("Create new") { createRootConfig() },
+                ))
             }
-            body.add(selector)
-            body.add(Box.createVerticalStrut(8))
-            body.add(actionRow(
-                JButton("Use selected config").apply {
-                    addActionListener { useConfig(setup.paths[selector.selectedIndex]) }
-                },
-                JButton("Create new").apply { addActionListener { createRootConfig() } },
-                JButton("Choose existing…").apply { addActionListener { chooseExistingConfig() } },
-            ))
+        } else {
+            infoCard(
+                "Choose a configuration",
+                "LocaleBreeze found ${setup.paths.size} configuration files in this project.",
+            ) {
+                val selector = JComboBox(setup.paths.map(::relativePath).toTypedArray()).apply {
+                    alignmentX = Component.LEFT_ALIGNMENT
+                    maximumSize = Dimension(Int.MAX_VALUE, preferredSize.height)
+                }
+                add(selector)
+                add(Box.createVerticalStrut(8))
+                add(actionRow(
+                    cardButton("Use selected config", primary = true) {
+                        useConfig(setup.paths[selector.selectedIndex])
+                    },
+                    cardButton("Create new") { createRootConfig() },
+                ))
+            }
         }
     }
 
     private fun renderConfigNotFound() {
-        heading("Configuration not found")
-        paragraph("No configuration file exists at the location selected in LocaleBreeze settings.")
-        body.add(actionRow(
-            JButton("Create new").apply { addActionListener { createRootConfig() } },
-            JButton("Choose existing…").apply { addActionListener { chooseExistingConfig() } },
-            JButton("Open settings…").apply {
-                addActionListener {
+        infoCard("Configuration not found", "No configuration file exists at the selected location.") {
+            add(actionRow(
+                cardButton("Create new") { createRootConfig() },
+                cardButton("Point to existing…") { chooseExistingConfig() },
+                cardButton("Open settings…") {
                     ShowSettingsUtil.getInstance().showSettingsDialog(project, LocaleBreezeConfigurable::class.java)
-                }
-            },
-        ))
+                },
+            ))
+        }
     }
 
     private fun createRootConfig() {
@@ -180,37 +203,65 @@ private class LocaleBreezeToolWindowPanel(
         alignmentX = Component.LEFT_ALIGNMENT
     }
 
+    private fun infoCard(title: String, message: String, content: (JPanel.() -> Unit)? = null) {
+        body.add(InfoCard().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            alignmentX = Component.LEFT_ALIGNMENT
+            border = JBUI.Borders.empty(12, 15)
+            add(WrappingText(title, emphasized = true))
+            if (message.isNotBlank()) {
+                add(Box.createVerticalStrut(8))
+                add(WrappingText(message))
+            }
+            if (content != null) {
+                add(Box.createVerticalStrut(12))
+                content()
+            }
+        })
+    }
+
+    private fun pluginDisabledMessage() {
+        body.add(InfoCard(JBColor(Color(0x343538), Color(0x343538))).apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            alignmentX = Component.LEFT_ALIGNMENT
+            border = JBUI.Borders.empty(12, 15)
+            add(WrappingText("LocaleBreeze is disabled in this workspace", emphasized = true, color = JBColor.YELLOW))
+            add(Box.createVerticalStrut(8))
+            add(WrappingText("Enable LocaleBreeze to find a configuration and start indexing translations."))
+        })
+    }
+
     private fun renderDisabled() {
-        heading("LocaleBreeze is disabled in this workspace")
-        paragraph("Enable LocaleBreeze to find a configuration and start indexing translations.")
+        body.add(JBLabel(sleepPluginIcon).apply {
+            alignmentX = Component.LEFT_ALIGNMENT
+        })
+        pluginDisabledMessage()
     }
 
     private fun renderStarting() {
-        heading("Starting LocaleBreeze…")
-        paragraph("The language server is indexing this workspace.")
-        body.add(JProgressBar().apply { isIndeterminate = true; alignmentX = Component.LEFT_ALIGNMENT })
+        infoCard("Starting LocaleBreeze…", "The language server is indexing this workspace.") {
+            add(JProgressBar().apply { isIndeterminate = true; alignmentX = Component.LEFT_ALIGNMENT })
+        }
     }
 
     private fun renderWaiting() {
-        heading("LocaleBreeze is ready")
-        paragraph("Open a JavaScript, TypeScript, or JSON file to start the language server.")
+        infoCard("LocaleBreeze is ready", "Open a JavaScript, TypeScript, or JSON file to start the language server.")
     }
 
     private fun renderUnavailable() {
-        heading("LocaleBreeze is unavailable")
-        paragraph("Refresh the workspace or open settings to check the configuration.")
+        infoCard("LocaleBreeze is unavailable", "Refresh the workspace or open settings to check the configuration.")
     }
 
     private fun renderHealthy(status: LocaleBreezeWorkspaceStatus?) {
-        heading("Workspace is healthy")
         if (status == null) {
-            paragraph("Waiting for workspace information.")
+            infoCard("Workspace is healthy", "Waiting for workspace information.")
             return
         }
-        metric(status.unusedKeyCount.toString(), "Unused keys")
-        metric(status.totalKeyCount.toString(), "Default-locale keys")
-        metric(status.dictionaryFileCount.toString(), "Dictionaries")
-        paragraph("Default locale: ${status.defaultLocale}")
+        infoCard("Workspace is healthy", "Default locale: ${status.defaultLocale}") {
+            add(metric(status.unusedKeyCount.toString(), "Unused keys"))
+            add(metric(status.totalKeyCount.toString(), "Default-locale keys"))
+            add(metric(status.dictionaryFileCount.toString(), "Dictionaries"))
+        }
     }
 
     private fun renderProblems(state: LocaleBreezeDashboardState) {
@@ -310,11 +361,10 @@ private class LocaleBreezeToolWindowPanel(
         body.add(Box.createVerticalStrut(8))
     }
 
-    private fun metric(value: String, label: String) {
-        body.add(JBLabel("<html><b>${html(value)}</b>&nbsp;&nbsp;${html(label)}</html>").apply {
+    private fun metric(value: String, label: String): JComponent =
+        JBLabel("<html><b>${html(value)}</b>&nbsp;&nbsp;${html(label)}</html>").apply {
             alignmentX = Component.LEFT_ALIGNMENT
-        })
-    }
+        }
 
     private fun row(vararg components: JComponent): JComponent = JPanel(FlowLayout(FlowLayout.LEFT, 0, 4)).apply {
         alignmentX = Component.LEFT_ALIGNMENT
@@ -338,6 +388,11 @@ private class LocaleBreezeToolWindowPanel(
         JButton(text).apply {
             isEnabled = enabled
             alignmentX = Component.LEFT_ALIGNMENT
+            addActionListener { action() }
+        }
+
+    private fun cardButton(text: String, primary: Boolean = false, action: () -> Unit): JButton =
+        RoundedCardButton(text, primary).apply {
             addActionListener { action() }
         }
 
@@ -400,7 +455,56 @@ private class LocaleBreezeToolWindowPanel(
         }
     }
 
-    private class WrappingText(text: String, emphasized: Boolean = false) : JTextArea(text) {
+    private class InfoCard(private var fillColor: Color? = null) : JPanel() {
+        private val fill = JBColor.namedColor("Notification.background", UIUtil.getPanelBackground())
+
+        init {
+            isOpaque = false
+        }
+
+        override fun getMaximumSize(): Dimension = Dimension(Int.MAX_VALUE, preferredSize.height)
+
+        override fun paintComponent(graphics: Graphics) {
+            val g = graphics.create() as Graphics2D
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+            g.color = fillColor ?: fill
+            g.fillRoundRect(0, 0, width - 1, height - 1, JBUI.scale(8), JBUI.scale(8))
+            g.dispose()
+            super.paintComponent(graphics)
+        }
+    }
+
+    private class RoundedCardButton(text: String, private val primary: Boolean) : JButton(text) {
+        private val outline = JBColor.namedColor("Component.borderColor", JBColor.border())
+        private val accent = JBColor(Color(0x3574F0), Color(0x3574F0))
+
+        init {
+            isContentAreaFilled = false
+            isOpaque = false
+            isFocusPainted = false
+            border = JBUI.Borders.empty(3, 6)
+            if (primary) {
+                foreground = JBColor(Color.WHITE, Color.WHITE)
+                font = font.deriveFont(java.awt.Font.BOLD)
+            }
+        }
+
+        override fun paintComponent(graphics: Graphics) {
+            val g = graphics.create() as Graphics2D
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+            val arc = JBUI.scale(8)
+            if (primary) {
+                g.color = accent
+                g.fillRoundRect(0, 0, width - 1, height - 1, arc, arc)
+            }
+            g.color = if (primary) accent else outline
+            g.drawRoundRect(0, 0, width - 1, height - 1, arc, arc)
+            g.dispose()
+            super.paintComponent(graphics)
+        }
+    }
+
+    private class WrappingText(text: String, emphasized: Boolean = false, color: Color? = null) : JTextArea(text) {
         init {
             isEditable = false
             isFocusable = false
@@ -409,8 +513,8 @@ private class LocaleBreezeToolWindowPanel(
             wrapStyleWord = true
             border = JBUI.Borders.empty()
             margin = Insets(0, 0, 0, 0)
-            font = JBLabel().font.let { if (emphasized) it.deriveFont(it.size2D + 2f) else it }
-            foreground = JBColor.foreground()
+            font = JBLabel().font.let { if (emphasized) it.deriveFont(java.awt.Font.BOLD,it.size2D + 2f) else it }
+            foreground = color ?: JBColor.foreground()
             alignmentX = Component.LEFT_ALIGNMENT
         }
 
