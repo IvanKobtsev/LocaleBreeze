@@ -13,6 +13,10 @@
 
   <extensions defaultExtensionNs="com.intellij">
     <platform.lsp.integrationProvider implementation="dev.localebreeze.jetbrains.LocaleBreezeLspIntegrationProvider"/>
+    <completion.contributor
+        language="any"
+        implementationClass="dev.localebreeze.jetbrains.LocaleBreezeCompletionContributor"
+        order="first"/>
     <gotoDeclarationHandler
         implementation="dev.localebreeze.jetbrains.LocaleBreezeGotoDeclarationHandler"
         order="first"/>
