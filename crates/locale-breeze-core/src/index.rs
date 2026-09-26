@@ -9,6 +9,24 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use url::Url;
 
+const PLURAL_SUFFIXES: [&str; 6] = ["_zero", "_one", "_two", "_few", "_many", "_other"];
+
+fn plural_base(key: &CanonicalKey, separator: &str) -> Option<CanonicalKey> {
+    PLURAL_SUFFIXES.iter().find_map(|suffix| {
+        key.as_str()
+            .strip_suffix(suffix)
+            .and_then(|base| CanonicalKey::new(base, separator))
+    })
+}
+
+fn occurrence_uses_exact_key(occurrence: &SourceOccurrence) -> bool {
+    occurrence.kind != OccurrenceKind::ScopeDeclaration
+        && !occurrence
+            .arguments
+            .as_ref()
+            .is_some_and(|arguments| arguments.has("count"))
+}
+
 #[derive(Clone, Debug)]
 pub enum CompletionContext {
     Scope {
@@ -27,6 +45,17 @@ pub enum CompletionContext {
         scope: Option<CanonicalKey>,
         query: String,
     },
+}
+
+impl CompletionContext {
+    pub fn query(&self) -> &str {
+        match self {
+            Self::Scope { query, .. }
+            | Self::Namespace { query }
+            | Self::FullKey { query, .. }
+            | Self::ScopedKey { query, .. } => query,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -105,6 +134,41 @@ impl IndexSnapshot {
             .unwrap_or_default()
     }
 
+    pub fn resolved_dictionary_entries<'a>(
+        &'a self,
+        occurrence: &SourceOccurrence,
+        separator: &str,
+    ) -> Vec<&'a DictionaryEntry> {
+        if occurrence
+            .arguments
+            .as_ref()
+            .is_some_and(|arguments| arguments.has("count"))
+        {
+            self.plural_dictionary_entries(
+                occurrence.namespace.as_deref(),
+                &occurrence.key,
+                separator,
+            )
+        } else {
+            self.dictionary_entries(occurrence.namespace.as_deref(), &occurrence.key)
+                .iter()
+                .collect()
+        }
+    }
+
+    pub fn plural_dictionary_entries<'a>(
+        &'a self,
+        namespace: Option<&str>,
+        base: &CanonicalKey,
+        separator: &str,
+    ) -> Vec<&'a DictionaryEntry> {
+        PLURAL_SUFFIXES
+            .iter()
+            .filter_map(|suffix| CanonicalKey::new(format!("{}{suffix}", base.as_str()), separator))
+            .flat_map(|key| self.dictionary_entries(namespace, &key))
+            .collect()
+    }
+
     pub fn direct_dictionary_children<'a>(
         &'a self,
         scope: &'a CanonicalKey,
@@ -143,7 +207,7 @@ impl IndexSnapshot {
     pub fn is_leaf_key_used(&self, key: &CanonicalKey) -> bool {
         self.occurrences(None, key)
             .iter()
-            .any(|occurrence| occurrence.kind != OccurrenceKind::ScopeDeclaration)
+            .any(occurrence_uses_exact_key)
             || self
                 .dynamic_scope_occurrences(None, key, ".")
                 .next()
@@ -153,7 +217,7 @@ impl IndexSnapshot {
     pub fn is_leaf_key_used_with_separator(&self, key: &CanonicalKey, separator: &str) -> bool {
         self.occurrences(None, key)
             .iter()
-            .any(|occurrence| occurrence.kind != OccurrenceKind::ScopeDeclaration)
+            .any(occurrence_uses_exact_key)
             || self
                 .dynamic_scope_occurrences(None, key, separator)
                 .next()
@@ -163,11 +227,47 @@ impl IndexSnapshot {
     pub fn is_leaf_entry_used(&self, entry: &DictionaryEntry, separator: &str) -> bool {
         self.occurrences(entry.namespace.as_deref(), &entry.key)
             .iter()
-            .any(|occurrence| occurrence.kind != OccurrenceKind::ScopeDeclaration)
+            .any(occurrence_uses_exact_key)
+            || plural_base(&entry.key, separator).is_some_and(|base| {
+                self.occurrences(entry.namespace.as_deref(), &base)
+                    .iter()
+                    .any(|occurrence| {
+                        occurrence
+                            .arguments
+                            .as_ref()
+                            .is_some_and(|arguments| arguments.has("count"))
+                    })
+            })
             || self
                 .dynamic_scope_occurrences(entry.namespace.as_deref(), &entry.key, separator)
                 .next()
                 .is_some()
+    }
+
+    pub fn occurrences_resolving_to<'a>(
+        &'a self,
+        namespace: Option<&'a str>,
+        key: &'a CanonicalKey,
+        separator: &str,
+    ) -> Vec<&'a SourceOccurrence> {
+        let mut occurrences = self
+            .occurrences(namespace, key)
+            .iter()
+            .filter(|occurrence| occurrence_uses_exact_key(occurrence))
+            .collect::<Vec<_>>();
+        if let Some(base) = plural_base(key, separator) {
+            occurrences.extend(
+                self.occurrences(namespace, &base)
+                    .iter()
+                    .filter(|occurrence| {
+                        occurrence
+                            .arguments
+                            .as_ref()
+                            .is_some_and(|arguments| arguments.has("count"))
+                    }),
+            );
+        }
+        occurrences
     }
 
     pub fn dynamic_scope_occurrences<'a>(
@@ -1026,6 +1126,49 @@ mod tests {
     use super::*;
     use crate::analyze_source;
     use crate::parse_dictionary;
+
+    #[test]
+    fn counted_calls_resolve_and_mark_only_cldr_plural_variants_used() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("locale-breeze.json"),
+            r#"{"dictionaries":"translation.{locale}.json","defaultLocale":"en","scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],"fullKeyFunctions":[{"functionName":"translate"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("translation.en.json"),
+            r#"{"item":"Base","item_one":"One","item_many":"Many","item_custom":"Custom"}"#,
+        )
+        .unwrap();
+        let source_path = temp.path().join("app.ts");
+        std::fs::write(&source_path, "i18next.t('item', { count: total })").unwrap();
+        let workspace = WorkspaceIndex::load(
+            temp.path().to_owned(),
+            &temp.path().join("locale-breeze.json"),
+        )
+        .unwrap();
+        let snapshot = workspace.snapshot();
+        let uri = Url::from_file_path(source_path).unwrap();
+        let occurrence = snapshot.source_occurrences(&uri).first().unwrap();
+        let resolved = snapshot
+            .resolved_dictionary_entries(occurrence, ".")
+            .into_iter()
+            .map(|entry| entry.key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(resolved, ["item_one", "item_many"]);
+        for key in ["item_one", "item_many"] {
+            let entry =
+                &snapshot.dictionary_entries(None, &CanonicalKey::new(key, ".").unwrap())[0];
+            assert!(snapshot.is_leaf_entry_used(entry, "."));
+        }
+        for key in ["item", "item_custom"] {
+            let entry =
+                &snapshot.dictionary_entries(None, &CanonicalKey::new(key, ".").unwrap())[0];
+            assert!(!snapshot.is_leaf_entry_used(entry, "."));
+        }
+        let many = CanonicalKey::new("item_many", ".").unwrap();
+        assert_eq!(snapshot.occurrences_resolving_to(None, &many, ".").len(), 1);
+    }
 
     #[test]
     fn ignored_scope_matching_is_exact_and_separator_aware() {

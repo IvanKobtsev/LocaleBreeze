@@ -9,7 +9,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use url::Url;
@@ -484,7 +484,8 @@ impl Server {
         let Some(context) = snapshot.completion_context_at(&uri, offset, workspace.config()) else {
             return Ok(None);
         };
-        let (candidates, incomplete) = snapshot.completions(
+        let filter_query = context.query().to_owned();
+        let (candidates, _) = snapshot.completions(
             &context,
             &workspace.config().default_locale,
             &workspace.config().key_separator,
@@ -499,7 +500,7 @@ impl Server {
                 },
                 kind: Some(CompletionItemKind::PROPERTY),
                 detail: Some(candidate.canonical_key),
-                filter_text: Some(candidate.key.clone()),
+                filter_text: Some(completion_filter_text(&filter_query, &candidate.key)),
                 insert_text: Some(candidate.key),
                 // Keep LocaleBreeze's results ahead of suggestions whose sort text is
                 // derived from their label, while preserving relevance within our list.
@@ -511,7 +512,10 @@ impl Server {
             })
             .collect();
         Ok(Some(CompletionResponse::List(CompletionList {
-            is_incomplete: incomplete,
+            // LocaleBreeze performs fuzzy matching against canonical keys. Ask
+            // clients to refresh after each edit instead of narrowing this list
+            // again with their stricter prefix matcher.
+            is_incomplete: true,
             items,
         })))
     }
@@ -560,8 +564,12 @@ impl Server {
                 )
             } else {
                 snapshot
-                    .occurrences(key.namespace.as_deref(), &key.key)
-                    .iter()
+                    .occurrences_resolving_to(
+                        key.namespace.as_deref(),
+                        &key.key,
+                        &workspace.config().key_separator,
+                    )
+                    .into_iter()
                     .chain(snapshot.dynamic_scope_occurrences(
                         key.namespace.as_deref(),
                         &key.key,
@@ -574,9 +582,20 @@ impl Server {
                 .filter_map(|occurrence| location(&snapshot, &occurrence.uri, &occurrence.range))
                 .collect::<Vec<_>>()
         } else {
-            snapshot
-                .dictionary_entries(key.namespace.as_deref(), &key.key)
-                .iter()
+            let entries = snapshot
+                .occurrence_at(&uri, offset)
+                .map(|occurrence| {
+                    snapshot
+                        .resolved_dictionary_entries(occurrence, &workspace.config().key_separator)
+                })
+                .unwrap_or_else(|| {
+                    snapshot
+                        .dictionary_entries(key.namespace.as_deref(), &key.key)
+                        .iter()
+                        .collect()
+                });
+            entries
+                .into_iter()
                 .filter(|entry| entry.locale == workspace.config().default_locale)
                 .filter_map(|entry| location(&snapshot, &entry.uri, &entry.key_range))
                 .collect::<Vec<_>>()
@@ -597,6 +616,40 @@ impl Server {
             return Ok(None);
         };
         let default_locale = &workspace.config().default_locale;
+        let offset = position_offset(&snapshot, &uri, position).unwrap_or(usize::MAX);
+        if let Some(occurrence) = snapshot.occurrence_at(&uri, offset)
+            && occurrence
+                .arguments
+                .as_ref()
+                .is_some_and(|arguments| arguments.has("count"))
+        {
+            let mut entries = snapshot
+                .resolved_dictionary_entries(occurrence, &workspace.config().key_separator)
+                .into_iter()
+                .filter(|entry| entry.locale == *default_locale)
+                .collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.key.cmp(&right.key));
+            if !entries.is_empty() {
+                let text = entries
+                    .into_iter()
+                    .map(|entry| {
+                        format!(
+                            "- `{}`: {}",
+                            entry.key,
+                            entry.value.as_deref().unwrap_or_default()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Ok(Some(Hover {
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: text,
+                    }),
+                    range: None,
+                }));
+            }
+        }
         let default_entry = snapshot
             .dictionary_entries(key.namespace.as_deref(), &key.key)
             .iter()
@@ -658,6 +711,7 @@ impl Server {
             return Ok(None);
         };
         let snapshot = workspace.snapshot();
+        let offset = position_offset(&snapshot, &uri, position).unwrap_or(usize::MAX);
         let Some(key) =
             key_at_position(&snapshot, &uri, position, &workspace.config().key_separator)
         else {
@@ -668,10 +722,7 @@ impl Server {
             .iter()
             .any(|e| e.kind == EntryKind::Object)
             || snapshot
-                .occurrence_at(
-                    &uri,
-                    position_offset(&snapshot, &uri, position).unwrap_or(usize::MAX),
-                )
+                .occurrence_at(&uri, offset)
                 .is_some_and(|o| o.kind == OccurrenceKind::ScopeDeclaration);
         let occurrences: Vec<_> = if is_scope {
             snapshot.scope_occurrences(
@@ -681,25 +732,72 @@ impl Server {
                 32,
             )
         } else {
-            snapshot
-                .occurrences(key.namespace.as_deref(), &key.key)
-                .iter()
-                .chain(snapshot.dynamic_scope_occurrences(
-                    key.namespace.as_deref(),
-                    &key.key,
-                    &workspace.config().key_separator,
-                ))
-                .collect()
+            let occurrence = snapshot.occurrence_at(&uri, offset);
+            if occurrence.is_some_and(|occurrence| {
+                occurrence
+                    .arguments
+                    .as_ref()
+                    .is_some_and(|arguments| arguments.has("count"))
+            }) {
+                snapshot
+                    .resolved_dictionary_entries(
+                        occurrence.unwrap(),
+                        &workspace.config().key_separator,
+                    )
+                    .into_iter()
+                    .flat_map(|entry| {
+                        snapshot.occurrences_resolving_to(
+                            entry.namespace.as_deref(),
+                            &entry.key,
+                            &workspace.config().key_separator,
+                        )
+                    })
+                    .collect()
+            } else {
+                snapshot
+                    .occurrences_resolving_to(
+                        key.namespace.as_deref(),
+                        &key.key,
+                        &workspace.config().key_separator,
+                    )
+                    .into_iter()
+                    .chain(snapshot.dynamic_scope_occurrences(
+                        key.namespace.as_deref(),
+                        &key.key,
+                        &workspace.config().key_separator,
+                    ))
+                    .collect()
+            }
         };
         let mut locations: Vec<_> = occurrences
             .into_iter()
             .filter_map(|o| location(&snapshot, &o.uri, &o.range))
             .collect();
+        locations.sort_by(|left, right| {
+            left.uri.as_str().cmp(right.uri.as_str()).then_with(|| {
+                left.range
+                    .start
+                    .cmp(&right.range.start)
+                    .then(left.range.end.cmp(&right.range.end))
+            })
+        });
+        locations.dedup();
         if params.context.include_declaration {
+            let entries = snapshot
+                .occurrence_at(&uri, offset)
+                .map(|occurrence| {
+                    snapshot
+                        .resolved_dictionary_entries(occurrence, &workspace.config().key_separator)
+                })
+                .unwrap_or_else(|| {
+                    snapshot
+                        .dictionary_entries(key.namespace.as_deref(), &key.key)
+                        .iter()
+                        .collect()
+                });
             locations.extend(
-                snapshot
-                    .dictionary_entries(key.namespace.as_deref(), &key.key)
-                    .iter()
+                entries
+                    .into_iter()
                     .filter_map(|e| location(&snapshot, &e.uri, &e.key_range)),
             );
         }
@@ -765,8 +863,11 @@ impl Server {
                     .filter_map(|occurrence| {
                         let range = location(&snapshot, &occurrence.uri, &occurrence.range)?.range;
                         let declaration_exists = snapshot
-                            .dictionary_entries(occurrence.namespace.as_deref(), &occurrence.key)
-                            .iter()
+                            .resolved_dictionary_entries(
+                                occurrence,
+                                &workspace.config().key_separator,
+                            )
+                            .into_iter()
                             .any(|entry| entry.locale == *default_locale);
                         let can_add = matches!(
                             occurrence.kind,
@@ -821,8 +922,8 @@ impl Server {
                 };
                 if occurrence.kind == OccurrenceKind::DynamicScope
                     || snapshot
-                        .dictionary_entries(occurrence.namespace.as_deref(), &occurrence.key)
-                        .iter()
+                        .resolved_dictionary_entries(occurrence, &workspace.config().key_separator)
+                        .into_iter()
                         .any(|entry| entry.locale == workspace.config().default_locale)
                 {
                     return Ok(None);
@@ -1032,6 +1133,14 @@ fn parse<T: DeserializeOwned>(value: Value) -> Result<T> {
     Ok(serde_json::from_value(value)?)
 }
 
+fn completion_filter_text(query: &str, key: &str) -> String {
+    if query.is_empty() {
+        key.to_owned()
+    } else {
+        format!("{query} {key}")
+    }
+}
+
 fn serialize_optional<T: serde::Serialize>(value: Option<T>) -> Result<Option<Value>> {
     value
         .map(serde_json::to_value)
@@ -1171,6 +1280,91 @@ fn diagnostic_notifications(
 ) -> Vec<Notification> {
     let snapshot = workspace.snapshot();
     let mut by_uri: HashMap<Url, Vec<Diagnostic>> = HashMap::new();
+    for file in snapshot.files.values() {
+        for occurrence in &file.occurrences {
+            let Some(arguments) = occurrence.arguments.as_ref() else {
+                continue;
+            };
+            if arguments.uncertain {
+                continue;
+            }
+            let entries = snapshot
+                .resolved_dictionary_entries(occurrence, &workspace.config().key_separator)
+                .into_iter()
+                .filter(|entry| {
+                    entry.locale == workspace.config().default_locale
+                        && entry.kind == EntryKind::Leaf
+                })
+                .collect::<Vec<_>>();
+            if entries.is_empty() {
+                continue;
+            }
+            let required = entries
+                .iter()
+                .filter_map(|entry| entry.value.as_deref())
+                .flat_map(interpolation_placeholders)
+                .collect::<BTreeSet<_>>();
+            let supplied = arguments
+                .supplied
+                .iter()
+                .map(|argument| argument.name.as_str())
+                .collect::<HashSet<_>>();
+            for missing in required
+                .iter()
+                .filter(|name| !supplied.contains(name.as_str()))
+            {
+                if let Some(range) =
+                    location(&snapshot, &occurrence.uri, &occurrence.range).map(|l| l.range)
+                {
+                    by_uri
+                        .entry(occurrence.uri.clone())
+                        .or_default()
+                        .push(Diagnostic {
+                            range,
+                            severity: Some(DiagnosticSeverity::ERROR),
+                            code: Some(NumberOrString::String(
+                                "missing-interpolation-value".into(),
+                            )),
+                            code_description: None,
+                            source: Some("locale-breeze".into()),
+                            message: format!(
+                                "Translation value requires interpolation argument `{missing}`"
+                            ),
+                            related_information: None,
+                            tags: None,
+                            data: None,
+                        });
+                }
+            }
+            for extra in arguments
+                .supplied
+                .iter()
+                .filter(|argument| argument.name != "count" && !required.contains(&argument.name))
+            {
+                if let Some(range) =
+                    location(&snapshot, &occurrence.uri, &extra.range).map(|l| l.range)
+                {
+                    by_uri
+                        .entry(occurrence.uri.clone())
+                        .or_default()
+                        .push(Diagnostic {
+                            range,
+                            severity: Some(DiagnosticSeverity::ERROR),
+                            code: Some(NumberOrString::String("extra-interpolation-value".into())),
+                            code_description: None,
+                            source: Some("locale-breeze".into()),
+                            message: format!(
+                                "Translation value does not use interpolation argument `{}`",
+                                extra.name
+                            ),
+                            related_information: None,
+                            tags: None,
+                            data: None,
+                        });
+                }
+            }
+        }
+    }
     let mut ignored_seen = HashSet::new();
     for occurrence in snapshot.ignored_occurrences().filter(|occurrence| {
         !occurrence.range.0.is_empty()
@@ -1259,6 +1453,28 @@ fn diagnostic_notifications(
             .into()
         })
         .collect()
+}
+
+fn interpolation_placeholders(value: &str) -> Vec<String> {
+    let mut placeholders = Vec::new();
+    let mut rest = value;
+    while let Some(open) = rest.find("{{") {
+        rest = &rest[open + 2..];
+        let Some(close) = rest.find("}}") else {
+            break;
+        };
+        let candidate = rest[..close].trim();
+        let mut chars = candidate.chars();
+        if chars
+            .next()
+            .is_some_and(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphabetic())
+            && chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
+        {
+            placeholders.push(candidate.to_owned());
+        }
+        rest = &rest[close + 2..];
+    }
+    placeholders
 }
 
 fn publish_diagnostics(
@@ -1705,6 +1921,149 @@ fn quoted_serde_field<'a>(message: &'a str, prefix: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validates_interpolation_arguments_across_plural_variants() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("locale-breeze.json"),
+            r#"{"dictionaries":"translation.{locale}.json","defaultLocale":"en","scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],"fullKeyFunctions":[{"functionName":"translate"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("translation.en.json"),
+            r#"{"item_one":"One {{name}}","item_many":"Many {{ total }} for {{name}}","plain":"Hello {{name}}"}"#,
+        )
+        .unwrap();
+        let source_path = temp.path().join("app.ts");
+        std::fs::write(
+            &source_path,
+            concat!(
+                "i18next.t('item', { count, name, extra });\n",
+                "i18next.t('plain', {});\n",
+                "i18next.t('plain', { ...values, extra });"
+            ),
+        )
+        .unwrap();
+        let workspace = WorkspaceIndex::load_with_preferences(
+            temp.path().to_owned(),
+            &temp.path().join("locale-breeze.json"),
+            WorkspacePreferences {
+                show_unused_keys: false,
+            },
+        )
+        .unwrap();
+        let source_uri = Url::from_file_path(source_path).unwrap();
+        let notifications = diagnostic_notifications(&workspace, &Mutex::new(HashMap::new()));
+        let params = notifications
+            .into_iter()
+            .map(|notification| {
+                serde_json::from_value::<PublishDiagnosticsParams>(notification.params).unwrap()
+            })
+            .find(|params| params.uri == source_uri)
+            .unwrap();
+        assert_eq!(params.diagnostics.len(), 3);
+        assert!(params.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == Some(NumberOrString::String("missing-interpolation-value".into()))
+                && diagnostic.message.contains("`total`")
+        }));
+        assert!(params.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == Some(NumberOrString::String("missing-interpolation-value".into()))
+                && diagnostic.message.contains("`name`")
+        }));
+        assert!(params.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == Some(NumberOrString::String("extra-interpolation-value".into()))
+                && diagnostic.message.contains("`extra`")
+        }));
+        assert!(
+            params
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.range.start.line < 2)
+        );
+    }
+
+    #[test]
+    fn extracts_only_simple_interpolation_identifiers() {
+        assert_eq!(
+            interpolation_placeholders(
+                "{{ name }} {{name}} {{nested.path}} {{value, format}} {{$ok}}"
+            ),
+            ["name", "name", "$ok"]
+        );
+    }
+
+    #[test]
+    fn completion_filter_text_keeps_fuzzy_canonical_matches_visible() {
+        assert_eq!(
+            completion_filter_text("login", "Page.login"),
+            "login Page.login"
+        );
+        assert_eq!(completion_filter_text("", "Page.login"), "Page.login");
+    }
+
+    #[test]
+    fn full_key_completion_survives_client_prefix_filtering() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("locale-breeze.json"),
+            r#"{
+              "dictionaries":"translation.{locale}.json",
+              "defaultLocale":"en",
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "fullKeyFunctions":[{"functionName":"translate"}]
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("translation.en.json"),
+            r#"{"Page":{"login":"Sign in"}}"#,
+        )
+        .unwrap();
+        let source_path = temp.path().join("app.ts");
+        std::fs::write(&source_path, "i18next.t('login')").unwrap();
+        let workspace = WorkspaceIndex::load(
+            temp.path().to_owned(),
+            &temp.path().join("locale-breeze.json"),
+        )
+        .unwrap();
+        let uri = Url::from_file_path(source_path).unwrap();
+        let server = Server {
+            workspaces: vec![Arc::new(workspace)],
+            workspace_roots: HashSet::new(),
+            watchers: vec![],
+            config_override: None,
+            preferences: WorkspacePreferences::default(),
+            published_diagnostics: Default::default(),
+        };
+
+        let response = server
+            .completion(CompletionParams {
+                text_document_position: TextDocumentPositionParams::new(
+                    TextDocumentIdentifier::new(uri),
+                    Position::new(0, 16),
+                ),
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+                context: None,
+            })
+            .unwrap()
+            .unwrap();
+        let CompletionResponse::List(completions) = response else {
+            panic!("expected a completion list");
+        };
+
+        assert!(completions.is_incomplete);
+        assert_eq!(completions.items.len(), 1);
+        assert_eq!(
+            completions.items[0].insert_text.as_deref(),
+            Some("Page.login")
+        );
+        assert_eq!(
+            completions.items[0].filter_text.as_deref(),
+            Some("login Page.login")
+        );
+    }
 
     #[test]
     fn distinguishes_configuration_shape_errors_from_invalid_json() {

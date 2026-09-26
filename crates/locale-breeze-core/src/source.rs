@@ -20,6 +20,25 @@ pub struct SourceOccurrence {
     pub kind: OccurrenceKind,
     pub scope: Option<CanonicalKey>,
     pub relative_key: Option<String>,
+    pub arguments: Option<TranslationArguments>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TranslationArgument {
+    pub name: String,
+    pub range: ByteRange,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TranslationArguments {
+    pub supplied: Vec<TranslationArgument>,
+    pub uncertain: bool,
+}
+
+impl TranslationArguments {
+    pub fn has(&self, name: &str) -> bool {
+        self.supplied.iter().any(|argument| argument.name == name)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -297,6 +316,7 @@ fn collect_calls(
                     kind: OccurrenceKind::ScopeDeclaration,
                     scope: None,
                     relative_key: None,
+                    arguments: None,
                 });
             }
         }
@@ -321,6 +341,7 @@ fn collect_calls(
                             kind: OccurrenceKind::ScopeDeclaration,
                             scope: None,
                             relative_key: None,
+                            arguments: None,
                         });
                     }
                 } else if callee == "useTranslation" {
@@ -333,6 +354,7 @@ fn collect_calls(
                             kind: OccurrenceKind::NamespaceDeclaration,
                             scope: None,
                             relative_key: None,
+                            arguments: None,
                         });
                     }
                 } else if callee == "i18next.t"
@@ -365,6 +387,7 @@ fn collect_calls(
                             kind: OccurrenceKind::FullKey,
                             scope: None,
                             relative_key: None,
+                            arguments: Some(translation_arguments(node, text)),
                         });
                     }
                 } else if let Some(binding) = resolve_binding(&callee, node.start_byte(), bindings)
@@ -389,6 +412,7 @@ fn collect_calls(
                             kind: OccurrenceKind::ScopedKey,
                             scope: binding.scope.clone(),
                             relative_key: Some(relative.to_owned()),
+                            arguments: Some(translation_arguments(node, text)),
                         });
                     }
                 }
@@ -431,6 +455,7 @@ fn collect_calls(
                         kind: OccurrenceKind::DynamicScope,
                         scope,
                         relative_key,
+                        arguments: None,
                     });
                 }
             } else if argument.kind() != "template_string"
@@ -445,6 +470,7 @@ fn collect_calls(
                         kind: OccurrenceKind::DynamicScope,
                         scope: None,
                         relative_key: None,
+                        arguments: None,
                     });
                 }
             }
@@ -539,6 +565,58 @@ fn call_argument(node: Node<'_>, index: usize) -> Option<Node<'_>> {
     let args = node.child_by_field_name("arguments")?;
     let mut cursor = args.walk();
     args.named_children(&mut cursor).nth(index)
+}
+
+fn translation_arguments(call: Node<'_>, text: &str) -> TranslationArguments {
+    let Some(options) = call_argument(call, 1) else {
+        return TranslationArguments::default();
+    };
+    if options.kind() != "object" {
+        return TranslationArguments {
+            supplied: vec![],
+            uncertain: true,
+        };
+    }
+    let mut result = TranslationArguments::default();
+    let mut cursor = options.walk();
+    for child in options.named_children(&mut cursor) {
+        match child.kind() {
+            "pair" => {
+                let Some(key) = child.child_by_field_name("key") else {
+                    result.uncertain = true;
+                    continue;
+                };
+                if !matches!(key.kind(), "property_identifier" | "identifier" | "string") {
+                    result.uncertain = true;
+                    continue;
+                }
+                let Some(name) = property_name(key, text) else {
+                    result.uncertain = true;
+                    continue;
+                };
+                result.supplied.push(TranslationArgument {
+                    name: name.to_owned(),
+                    range: if key.kind() == "string" {
+                        content_range(key)
+                    } else {
+                        ByteRange(key.byte_range())
+                    },
+                });
+            }
+            "shorthand_property_identifier" => {
+                if let Ok(name) = child.utf8_text(text.as_bytes()) {
+                    result.supplied.push(TranslationArgument {
+                        name: name.to_owned(),
+                        range: ByteRange(child.byte_range()),
+                    });
+                } else {
+                    result.uncertain = true;
+                }
+            }
+            _ => result.uncertain = true,
+        }
+    }
+    result
 }
 
 fn object_string_property(node: Node<'_>, text: &str, expected: &str) -> Option<String> {
@@ -682,6 +760,7 @@ fn collect_lexical_key_sinks(
             kind: OccurrenceKind::FullKey,
             scope: None,
             relative_key: None,
+            arguments: None,
         });
     }
 
@@ -778,6 +857,31 @@ fn lexical_container(mut node: Node<'_>) -> Node<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn captures_static_translation_arguments_and_uncertainty() {
+        let uri = Url::parse("file:///app.ts").unwrap();
+        let text = "i18next.t('items', { count, name: user, 'label': value }); i18next.t('other', { count, ...values }); i18next.t('third', options);";
+        let (found, _) = analyze_source(&uri, text, ".", &[], &[], &["i18next.t".into()], &[], &[]);
+        let calls = found
+            .iter()
+            .filter(|occurrence| occurrence.kind == OccurrenceKind::FullKey)
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 3);
+        let first = calls[0].arguments.as_ref().unwrap();
+        assert!(!first.uncertain);
+        assert_eq!(
+            first
+                .supplied
+                .iter()
+                .map(|argument| argument.name.as_str())
+                .collect::<Vec<_>>(),
+            ["count", "name", "label"]
+        );
+        assert!(calls[1].arguments.as_ref().unwrap().uncertain);
+        assert!(calls[1].arguments.as_ref().unwrap().has("count"));
+        assert!(calls[2].arguments.as_ref().unwrap().uncertain);
+    }
+
     #[test]
     fn recognizes_supported_patterns() {
         let text = r#"

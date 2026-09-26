@@ -18,7 +18,8 @@ pub use index::{
 };
 pub use line_index::LineIndex;
 pub use source::{
-    OccurrenceKind, ScopeBinding, SourceOccurrence, analyze_source, analyze_source_with_namespace,
+    OccurrenceKind, ScopeBinding, SourceOccurrence, TranslationArgument, TranslationArguments,
+    analyze_source, analyze_source_with_namespace,
 };
 
 use std::fmt;
