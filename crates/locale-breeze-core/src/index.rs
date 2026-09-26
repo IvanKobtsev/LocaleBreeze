@@ -1,6 +1,6 @@
 use crate::{
     CanonicalKey, Config, DictionaryEntry, EntryKind, FileContribution, OccurrenceKind,
-    SourceOccurrence, analyze_source, parse_dictionary_ignoring,
+    QualifiedKey, SourceOccurrence, analyze_source_with_namespace, parse_dictionary_in_namespace,
 };
 use arc_swap::ArcSwap;
 use ignore::WalkBuilder;
@@ -11,9 +11,22 @@ use url::Url;
 
 #[derive(Clone, Debug)]
 pub enum CompletionContext {
-    Scope { query: String },
-    FullKey { query: String },
-    ScopedKey { scope: CanonicalKey, query: String },
+    Scope {
+        namespace: Option<String>,
+        query: String,
+    },
+    Namespace {
+        query: String,
+    },
+    FullKey {
+        namespace: Option<String>,
+        query: String,
+    },
+    ScopedKey {
+        namespace: Option<String>,
+        scope: Option<CanonicalKey>,
+        query: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -28,8 +41,8 @@ pub struct CompletionCandidate {
 pub struct IndexSnapshot {
     pub generation: u64,
     pub files: HashMap<Url, Arc<FileContribution>>,
-    dictionaries: BTreeMap<CanonicalKey, Vec<DictionaryEntry>>,
-    occurrences: BTreeMap<CanonicalKey, Vec<SourceOccurrence>>,
+    dictionaries: BTreeMap<QualifiedKey, Vec<DictionaryEntry>>,
+    occurrences: BTreeMap<QualifiedKey, Vec<SourceOccurrence>>,
 }
 
 impl IndexSnapshot {
@@ -38,18 +51,27 @@ impl IndexSnapshot {
             .into_values()
             .map(|file| (normalized_uri(&file.uri), file))
             .collect::<HashMap<_, _>>();
-        let mut dictionaries: BTreeMap<CanonicalKey, Vec<DictionaryEntry>> = BTreeMap::new();
-        let mut occurrences: BTreeMap<CanonicalKey, Vec<SourceOccurrence>> = BTreeMap::new();
+        let mut dictionaries: BTreeMap<QualifiedKey, Vec<DictionaryEntry>> = BTreeMap::new();
+        let mut occurrences: BTreeMap<QualifiedKey, Vec<SourceOccurrence>> = BTreeMap::new();
         for file in files.values() {
             for entry in &file.dictionaries {
                 dictionaries
-                    .entry(entry.key.clone())
+                    .entry(QualifiedKey::new(
+                        entry.namespace.clone(),
+                        entry.key.clone(),
+                    ))
                     .or_default()
                     .push(entry.clone());
             }
             for occurrence in &file.occurrences {
+                if occurrence.kind == OccurrenceKind::NamespaceDeclaration {
+                    continue;
+                }
                 occurrences
-                    .entry(occurrence.key.clone())
+                    .entry(QualifiedKey::new(
+                        occurrence.namespace.clone(),
+                        occurrence.key.clone(),
+                    ))
                     .or_default()
                     .push(occurrence.clone());
             }
@@ -69,9 +91,16 @@ impl IndexSnapshot {
         }
     }
 
-    pub fn dictionary_entries(&self, key: &CanonicalKey) -> &[DictionaryEntry] {
+    pub fn dictionary_entries(
+        &self,
+        namespace: Option<&str>,
+        key: &CanonicalKey,
+    ) -> &[DictionaryEntry] {
         self.dictionaries
-            .get(key)
+            .get(&QualifiedKey::new(
+                namespace.map(str::to_owned),
+                key.clone(),
+            ))
             .map(Vec::as_slice)
             .unwrap_or_default()
     }
@@ -79,17 +108,24 @@ impl IndexSnapshot {
     pub fn direct_dictionary_children<'a>(
         &'a self,
         scope: &'a CanonicalKey,
+        namespace: Option<&'a str>,
         separator: &'a str,
     ) -> impl Iterator<Item = &'a DictionaryEntry> + 'a {
         self.dictionaries
             .iter()
-            .filter(move |(key, _)| key.parent(separator).as_ref() == Some(scope))
+            .filter(move |(key, _)| {
+                key.namespace.as_deref() == namespace
+                    && key.key.parent(separator).as_ref() == Some(scope)
+            })
             .flat_map(|(_, entries)| entries)
     }
 
-    pub fn occurrences(&self, key: &CanonicalKey) -> &[SourceOccurrence] {
+    pub fn occurrences(&self, namespace: Option<&str>, key: &CanonicalKey) -> &[SourceOccurrence] {
         self.occurrences
-            .get(key)
+            .get(&QualifiedKey::new(
+                namespace.map(str::to_owned),
+                key.clone(),
+            ))
             .map(Vec::as_slice)
             .unwrap_or_default()
     }
@@ -105,24 +141,38 @@ impl IndexSnapshot {
     }
 
     pub fn is_leaf_key_used(&self, key: &CanonicalKey) -> bool {
-        self.occurrences(key)
-            .iter()
-            .any(|occurrence| occurrence.kind != OccurrenceKind::ScopeDeclaration)
-            || self.dynamic_scope_occurrences(key, ".").next().is_some()
-    }
-
-    pub fn is_leaf_key_used_with_separator(&self, key: &CanonicalKey, separator: &str) -> bool {
-        self.occurrences(key)
+        self.occurrences(None, key)
             .iter()
             .any(|occurrence| occurrence.kind != OccurrenceKind::ScopeDeclaration)
             || self
-                .dynamic_scope_occurrences(key, separator)
+                .dynamic_scope_occurrences(None, key, ".")
+                .next()
+                .is_some()
+    }
+
+    pub fn is_leaf_key_used_with_separator(&self, key: &CanonicalKey, separator: &str) -> bool {
+        self.occurrences(None, key)
+            .iter()
+            .any(|occurrence| occurrence.kind != OccurrenceKind::ScopeDeclaration)
+            || self
+                .dynamic_scope_occurrences(None, key, separator)
+                .next()
+                .is_some()
+    }
+
+    pub fn is_leaf_entry_used(&self, entry: &DictionaryEntry, separator: &str) -> bool {
+        self.occurrences(entry.namespace.as_deref(), &entry.key)
+            .iter()
+            .any(|occurrence| occurrence.kind != OccurrenceKind::ScopeDeclaration)
+            || self
+                .dynamic_scope_occurrences(entry.namespace.as_deref(), &entry.key, separator)
                 .next()
                 .is_some()
     }
 
     pub fn dynamic_scope_occurrences<'a>(
         &'a self,
+        namespace: Option<&'a str>,
         key: &'a CanonicalKey,
         separator: &'a str,
     ) -> impl Iterator<Item = &'a SourceOccurrence> + 'a {
@@ -131,6 +181,7 @@ impl IndexSnapshot {
             .flatten()
             .filter(move |occurrence| {
                 occurrence.kind == OccurrenceKind::DynamicScope
+                    && occurrence.namespace.as_deref() == namespace
                     && (occurrence.key == *key
                         || key
                             .as_str()
@@ -200,11 +251,43 @@ impl IndexSnapshot {
         let callee = callee
             .rsplit(|c: char| c.is_whitespace() || matches!(c, ';' | '=' | '{' | '}'))
             .next()?;
-        if config.scoped_functions.iter().any(|x| x == callee) {
-            return Some(CompletionContext::Scope { query });
+        if callee == "useTranslation" && !call_prefix[open + 1..].contains(',') {
+            return Some(CompletionContext::Namespace { query });
         }
-        if config.full_key_functions.iter().any(|x| x == callee) {
-            return Some(CompletionContext::FullKey { query });
+        if let Some(function) = config.scoped_function(callee) {
+            let namespace = function
+                .default_namespace
+                .clone()
+                .or_else(|| config.default_namespace.clone());
+            return Some(CompletionContext::Scope { namespace, query });
+        }
+        if callee == "useTranslation"
+            && call_prefix[open + 1..].contains(',')
+            && call_prefix[open + 1..].contains("keyPrefix")
+        {
+            let arguments = &call_prefix[open + 1..];
+            let namespace = first_literal(arguments).or_else(|| {
+                config
+                    .dictionary_pattern()
+                    .ok()
+                    .filter(|pattern| pattern.has_namespace())
+                    .and_then(|_| config.default_namespace.clone())
+            });
+            return Some(CompletionContext::Scope { namespace, query });
+        }
+        if callee == "i18next.t" || config.full_key_function(callee).is_some() {
+            let (namespace, query) = if let Some((namespace, key)) = query.split_once(':') {
+                (Some(namespace.to_owned()), key.to_owned())
+            } else {
+                (
+                    config
+                        .full_key_function(callee)
+                        .and_then(|function| function.default_namespace.clone())
+                        .or_else(|| config.default_namespace.clone()),
+                    query,
+                )
+            };
+            return Some(CompletionContext::FullKey { namespace, query });
         }
         let binding = file.bindings.iter().rev().find(|b| {
             b.visibility.contains(offset)
@@ -214,7 +297,13 @@ impl IndexSnapshot {
                     callee == format!("{}.{}", b.name, b.method)
                 }
         })?;
+        let (namespace, query) = if let Some((namespace, key)) = query.split_once(':') {
+            (Some(namespace.to_owned()), key.to_owned())
+        } else {
+            (binding.namespace.clone(), query)
+        };
         Some(CompletionContext::ScopedKey {
+            namespace,
             scope: binding.scope.clone(),
             query,
         })
@@ -227,14 +316,57 @@ impl IndexSnapshot {
         separator: &str,
         limit: usize,
     ) -> (Vec<CompletionCandidate>, bool) {
-        let (query, scope, objects) = match context {
-            CompletionContext::Scope { query } => (query.as_str(), None, true),
-            CompletionContext::FullKey { query } => (query.as_str(), None, false),
-            CompletionContext::ScopedKey { scope, query } => (query.as_str(), Some(scope), false),
+        if let CompletionContext::Namespace { query } = context {
+            let normalized_query = normalize(query);
+            let mut namespaces = self
+                .dictionaries
+                .keys()
+                .filter_map(|key| key.namespace.as_deref())
+                .collect::<Vec<_>>();
+            namespaces.sort_unstable();
+            namespaces.dedup();
+            let mut candidates = namespaces
+                .into_iter()
+                .filter_map(|namespace| {
+                    let score = match_score(
+                        &normalized_query,
+                        &normalize(namespace),
+                        &normalize(namespace),
+                    )?;
+                    Some(CompletionCandidate {
+                        key: namespace.to_owned(),
+                        canonical_key: namespace.to_owned(),
+                        detail: None,
+                        score,
+                    })
+                })
+                .collect::<Vec<_>>();
+            candidates.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.key.cmp(&b.key)));
+            let incomplete = candidates.len() > limit;
+            candidates.truncate(limit);
+            return (candidates, incomplete);
+        }
+        let (namespace, query, scope, objects) = match context {
+            CompletionContext::Scope { namespace, query } => {
+                (namespace.as_deref(), query.as_str(), None, true)
+            }
+            CompletionContext::FullKey { namespace, query } => {
+                (namespace.as_deref(), query.as_str(), None, false)
+            }
+            CompletionContext::ScopedKey {
+                namespace,
+                scope,
+                query,
+            } => (namespace.as_deref(), query.as_str(), scope.as_ref(), false),
+            CompletionContext::Namespace { .. } => unreachable!(),
         };
         let normalized_query = normalize(query);
         let mut candidates = Vec::new();
-        for (key, entries) in &self.dictionaries {
+        for (qualified, entries) in &self.dictionaries {
+            if qualified.namespace.as_deref() != namespace {
+                continue;
+            }
+            let key = &qualified.key;
             let is_object = entries.iter().any(|e| e.kind == EntryKind::Object);
             if objects != is_object {
                 continue;
@@ -256,7 +388,11 @@ impl IndexSnapshot {
                 .and_then(|e| e.value.as_deref());
             let mut haystacks = vec![normalize(key.as_str()), normalize(&insert)];
             if objects {
-                for (descendant, _) in self.dictionaries.range(key.clone()..) {
+                for descendant in self.dictionaries.keys() {
+                    if descendant.namespace != qualified.namespace {
+                        continue;
+                    }
+                    let descendant = &descendant.key;
                     if descendant == key
                         || !descendant
                             .as_str()
@@ -293,6 +429,7 @@ impl IndexSnapshot {
 
     pub fn scope_occurrences(
         &self,
+        namespace: Option<&str>,
         scope: &CanonicalKey,
         separator: &str,
         recursive_leaf_limit: usize,
@@ -300,9 +437,10 @@ impl IndexSnapshot {
         let descendant_prefix = format!("{}{}", scope, separator);
         let descendant_leaf_count = self
             .dictionaries
-            .range(scope.clone()..)
+            .iter()
             .filter(|(key, entries)| {
-                key.as_str().starts_with(&descendant_prefix)
+                key.namespace.as_deref() == namespace
+                    && key.key.as_str().starts_with(&descendant_prefix)
                     && entries.iter().any(|entry| entry.kind == EntryKind::Leaf)
             })
             .take(recursive_leaf_limit + 1)
@@ -313,17 +451,18 @@ impl IndexSnapshot {
             .values()
             .flatten()
             .filter(|o| {
-                o.kind == OccurrenceKind::ScopeDeclaration && &o.key == scope
-                    || o.kind == OccurrenceKind::DynamicScope
-                        && (o.key == *scope
-                            || scope
-                                .as_str()
-                                .starts_with(&format!("{}{}", o.key, separator)))
-                    || if recursive {
-                        o.key.as_str().starts_with(&descendant_prefix)
-                    } else {
-                        o.key.parent(separator).as_ref() == Some(scope)
-                    }
+                o.namespace.as_deref() == namespace
+                    && (o.kind == OccurrenceKind::ScopeDeclaration && &o.key == scope
+                        || o.kind == OccurrenceKind::DynamicScope
+                            && (o.key == *scope
+                                || scope
+                                    .as_str()
+                                    .starts_with(&format!("{}{}", o.key, separator)))
+                        || if recursive {
+                            o.key.as_str().starts_with(&descendant_prefix)
+                        } else {
+                            o.key.parent(separator).as_ref() == Some(scope)
+                        })
             })
             .collect()
     }
@@ -331,6 +470,14 @@ impl IndexSnapshot {
 
 fn normalize(value: &str) -> String {
     value.to_lowercase()
+}
+
+fn first_literal(value: &str) -> Option<String> {
+    let start = value.find(['\'', '"'])?;
+    let quote = value.as_bytes()[start];
+    let rest = &value[start + 1..];
+    let end = rest.find(quote as char)?;
+    Some(rest[..end].to_owned())
 }
 
 fn match_score(query: &str, haystack: &str, insert: &str) -> Option<i64> {
@@ -396,7 +543,24 @@ impl WorkspaceIndex {
         config_path: &Path,
         preferences: WorkspacePreferences,
     ) -> Result<Self, crate::ConfigError> {
-        let config = Config::load(config_path)?;
+        let mut config = Config::load(config_path)?;
+        let pattern = config.dictionary_pattern()?;
+        if pattern.has_namespace() && config.default_namespace.is_none() {
+            let mut namespaces = WalkBuilder::new(pattern.search_root(&root))
+                .standard_filters(true)
+                .build()
+                .filter_map(Result::ok)
+                .filter_map(|entry| pattern.identity_for(&root, entry.path()))
+                .filter_map(|identity| identity.namespace)
+                .collect::<Vec<_>>();
+            namespaces.sort();
+            namespaces.dedup();
+            if namespaces.len() == 1 {
+                config.default_namespace = namespaces.pop();
+            } else {
+                return Err(crate::ConfigError::MissingDefaultNamespace);
+            }
+        }
         let ignored_scopes = config.ignored_scope_set();
         let this = Self {
             root,
@@ -415,17 +579,61 @@ impl WorkspaceIndex {
                 column: issue.column,
             });
         }
-        if !this
+        let identities = this
             .snapshot()
             .files
             .values()
             .filter_map(|file| file.uri.to_file_path().ok())
-            .filter_map(|path| dictionary_pattern.locale_for(&this.root, &path))
-            .any(|locale| locale == this.config.default_locale)
+            .filter_map(|path| dictionary_pattern.identity_for(&this.root, &path))
+            .collect::<Vec<_>>();
+        if !identities
+            .iter()
+            .any(|identity| identity.locale == this.config.default_locale)
         {
             return Err(crate::ConfigError::MissingDefaultLocale(
                 this.config.default_locale.clone(),
             ));
+        }
+        let namespace_exists = |namespace: Option<&str>| {
+            identities.iter().any(|identity| {
+                identity.locale == this.config.default_locale
+                    && identity.namespace.as_deref() == namespace
+            })
+        };
+        if !namespace_exists(this.config.default_namespace.as_deref()) {
+            return Err(crate::ConfigError::MissingNamespaceDictionary {
+                field: "defaultNamespace".into(),
+                namespace: this.config.default_namespace.clone().unwrap_or_default(),
+                locale: this.config.default_locale.clone(),
+            });
+        }
+        for function in &this.config.scoped_functions {
+            if let Some(namespace) = function.default_namespace.as_deref()
+                && !namespace_exists(Some(namespace))
+            {
+                return Err(crate::ConfigError::MissingNamespaceDictionary {
+                    field: format!(
+                        "scopedFunctions[{}].defaultNamespace",
+                        function.function_name
+                    ),
+                    namespace: namespace.into(),
+                    locale: this.config.default_locale.clone(),
+                });
+            }
+        }
+        for function in &this.config.full_key_functions {
+            if let Some(namespace) = function.default_namespace.as_deref()
+                && !namespace_exists(Some(namespace))
+            {
+                return Err(crate::ConfigError::MissingNamespaceDictionary {
+                    field: format!(
+                        "fullKeyFunctions[{}].defaultNamespace",
+                        function.function_name
+                    ),
+                    namespace: namespace.into(),
+                    locale: this.config.default_locale.clone(),
+                });
+            }
         }
         Ok(this)
     }
@@ -438,7 +646,7 @@ impl WorkspaceIndex {
         for result in WalkBuilder::new(root).standard_filters(true).build() {
             let entry = result.ok()?;
             if !entry.file_type().is_some_and(|kind| kind.is_file())
-                || pattern.locale_for(&self.root, entry.path()).is_none()
+                || pattern.identity_for(&self.root, entry.path()).is_none()
             {
                 continue;
             }
@@ -455,10 +663,11 @@ impl WorkspaceIndex {
                 }
             };
             let uri = Url::from_file_path(path).ok()?;
-            let locale = pattern.locale_for(&self.root, path)?;
-            if let Err(error) = parse_dictionary_ignoring(
+            let identity = pattern.identity_for(&self.root, path)?;
+            if let Err(error) = parse_dictionary_in_namespace(
                 &uri,
-                &locale,
+                &identity.locale,
+                identity.namespace.as_deref(),
                 &text,
                 &self.config.key_separator,
                 &|key| self.is_ignored_key(key),
@@ -499,7 +708,7 @@ impl WorkspaceIndex {
         self.config
             .dictionary_pattern()
             .ok()
-            .and_then(|pattern| pattern.locale_for(&self.root, path))
+            .and_then(|pattern| pattern.identity_for(&self.root, path))
             .is_some()
     }
     pub fn contains_path(&self, path: &Path) -> bool {
@@ -508,7 +717,7 @@ impl WorkspaceIndex {
                 .config
                 .dictionary_pattern()
                 .expect("validated pattern")
-                .locale_for(&self.root, path)
+                .identity_for(&self.root, path)
                 .is_some()
     }
     pub fn is_ignored_key(&self, key: &CanonicalKey) -> bool {
@@ -620,7 +829,7 @@ impl WorkspaceIndex {
         let file_key = normalized_uri(&uri);
         let current = self.snapshot.load_full();
         let pattern = self.config.dictionary_pattern().expect("validated pattern");
-        let dictionary_issue = pattern.locale_for(&self.root, path).and_then(|locale| {
+        let dictionary_issue = pattern.identity_for(&self.root, path).and_then(|identity| {
             let text = match std::fs::read_to_string(path) {
                 Ok(text) => text,
                 Err(error) => {
@@ -632,9 +841,14 @@ impl WorkspaceIndex {
                     });
                 }
             };
-            parse_dictionary_ignoring(&uri, &locale, &text, &self.config.key_separator, &|key| {
-                self.is_ignored_key(key)
-            })
+            parse_dictionary_in_namespace(
+                &uri,
+                &identity.locale,
+                identity.namespace.as_deref(),
+                &text,
+                &self.config.key_separator,
+                &|key| self.is_ignored_key(key),
+            )
             .err()
             .map(|error| {
                 let (line, column) = match &error {
@@ -671,10 +885,11 @@ impl WorkspaceIndex {
     ) -> Option<FileContribution> {
         let text = std::fs::read_to_string(path).ok()?;
         let uri = Url::from_file_path(path).ok()?;
-        if let Some(locale) = pattern.locale_for(&self.root, path) {
-            let dictionaries = parse_dictionary_ignoring(
+        if let Some(identity) = pattern.identity_for(&self.root, path) {
+            let dictionaries = parse_dictionary_in_namespace(
                 &uri,
-                &locale,
+                &identity.locale,
+                identity.namespace.as_deref(),
                 &text,
                 &self.config.key_separator,
                 &|key| self.is_ignored_key(key),
@@ -699,10 +914,11 @@ impl WorkspaceIndex {
     fn parse_text(&self, uri: Url, text: String, version: Option<i32>) -> Option<FileContribution> {
         let path = uri.to_file_path().ok()?;
         let pattern = self.config.dictionary_pattern().ok()?;
-        if let Some(locale) = pattern.locale_for(&self.root, &path) {
-            let dictionaries = parse_dictionary_ignoring(
+        if let Some(identity) = pattern.identity_for(&self.root, &path) {
+            let dictionaries = parse_dictionary_in_namespace(
                 &uri,
-                &locale,
+                &identity.locale,
+                identity.namespace.as_deref(),
                 &text,
                 &self.config.key_separator,
                 &|key| self.is_ignored_key(key),
@@ -718,20 +934,33 @@ impl WorkspaceIndex {
                 bindings: vec![],
             })
         } else if is_source(&path) {
-            let (analyzed_occurrences, bindings) = analyze_source(
+            let (mut analyzed_occurrences, mut bindings) = analyze_source_with_namespace(
                 &uri,
                 &text,
                 &self.config.key_separator,
                 &self.config.scoped_functions,
-                &self.config.translation_methods,
                 &self.config.full_key_functions,
                 &self.config.translation_key_types,
                 &self.config.translation_key_props,
+                pattern
+                    .has_namespace()
+                    .then_some(self.config.default_namespace.as_deref())
+                    .flatten(),
             );
+            if !pattern.has_namespace() {
+                for occurrence in &mut analyzed_occurrences {
+                    occurrence.namespace = None;
+                }
+                for binding in &mut bindings {
+                    binding.namespace = None;
+                }
+            }
             let mut occurrences = Vec::new();
             let mut ignored_occurrences = Vec::new();
             for occurrence in analyzed_occurrences {
-                if !self.is_ignored_key(&occurrence.key) {
+                if occurrence.kind == OccurrenceKind::NamespaceDeclaration
+                    || !self.is_ignored_key(&occurrence.key)
+                {
                     occurrences.push(occurrence);
                 } else if !occurrence.range.0.is_empty()
                     && (occurrence.kind == OccurrenceKind::ScopeDeclaration
@@ -795,6 +1024,7 @@ fn is_source(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analyze_source;
     use crate::parse_dictionary;
 
     #[test]
@@ -823,9 +1053,8 @@ mod tests {
             r#"{
               "dictionaries":"translation.{locale}.json",
               "defaultLocale":"en",
-              "scopedFunctions":["useScopedTranslation"],
-              "translationMethods":["t"],
-              "fullKeyFunctions":["i18next.t"],
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "fullKeyFunctions":[{"functionName":"translate"}],
               "ignoredScopes":["Server_Errors"]
             }"#,
         )
@@ -853,9 +1082,9 @@ mod tests {
         let snapshot = workspace.snapshot();
         let ignored_key = CanonicalKey::new("Server_Errors.Invalid", ".").unwrap();
         let normal_key = CanonicalKey::new("Page.title", ".").unwrap();
-        assert!(snapshot.dictionary_entries(&ignored_key).is_empty());
-        assert!(snapshot.occurrences(&ignored_key).is_empty());
-        assert_eq!(snapshot.occurrences(&normal_key).len(), 1);
+        assert!(snapshot.dictionary_entries(None, &ignored_key).is_empty());
+        assert!(snapshot.occurrences(None, &ignored_key).is_empty());
+        assert_eq!(snapshot.occurrences(None, &normal_key).len(), 1);
         assert_eq!(snapshot.ignored_occurrences().count(), 2);
     }
     #[cfg(windows)]
@@ -898,7 +1127,8 @@ mod tests {
         let scope = CanonicalKey::new("Page.Login", ".").unwrap();
         let (found, _) = snapshot.completions(
             &CompletionContext::ScopedKey {
-                scope: scope.clone(),
+                namespace: None,
+                scope: Some(scope.clone()),
                 query: "my_k".into(),
             },
             "en",
@@ -909,7 +1139,8 @@ mod tests {
 
         let (found, _) = snapshot.completions(
             &CompletionContext::ScopedKey {
-                scope,
+                namespace: None,
+                scope: Some(scope),
                 query: "My value".into(),
             },
             "en",
@@ -1027,10 +1258,10 @@ mod tests {
 
         let scope = CanonicalKey::new("Scope", ".").unwrap();
         let small = snapshot_with_leaf_count(2);
-        assert_eq!(small.scope_occurrences(&scope, ".", 32).len(), 2);
+        assert_eq!(small.scope_occurrences(None, &scope, ".", 32).len(), 2);
 
         let large = snapshot_with_leaf_count(33);
-        let occurrences = large.scope_occurrences(&scope, ".", 32);
+        let occurrences = large.scope_occurrences(None, &scope, ".", 32);
         assert_eq!(occurrences.len(), 1);
         assert_eq!(occurrences[0].kind, OccurrenceKind::ScopeDeclaration);
         assert_eq!(occurrences[0].key.as_str(), "Scope.Child0");
@@ -1080,7 +1311,7 @@ mod tests {
         let leaf = CanonicalKey::new("SomeScope.child.leaf", ".").unwrap();
         assert!(snapshot.is_leaf_key_used_with_separator(&leaf, "."));
         let references = snapshot
-            .dynamic_scope_occurrences(&leaf, ".")
+            .dynamic_scope_occurrences(None, &leaf, ".")
             .collect::<Vec<_>>();
         assert_eq!(references.len(), 1);
         assert_eq!(references[0].key.as_str(), "SomeScope");
@@ -1113,8 +1344,10 @@ mod tests {
             IndexSnapshot::rebuild(1, HashMap::from([(uri.clone(), Arc::new(contribution))]));
         let config: Config = serde_json::from_value(serde_json::json!({
             "dictionaries":"translation.{locale}.json", "defaultLocale":"en", "keySeparator":".",
-            "scopedFunctions":["useScopedTranslation"], "translationMethods":["t"], "fullKeyFunctions":["i18next.t"]
-        })).unwrap();
+            "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "fullKeyFunctions":[{"functionName":"translate"}]
+        }))
+        .unwrap();
         assert!(matches!(
             snapshot.completion_context_at(&uri, text.len() - 1, &config),
             Some(CompletionContext::ScopedKey { .. })
@@ -1131,9 +1364,8 @@ mod tests {
               "dictionaries":"dict/translation.{locale}.json",
               "defaultLocale":"en",
               "keySeparator":".",
-              "scopedFunctions":["useScopedTranslation"],
-              "translationMethods":["t"],
-              "fullKeyFunctions":["i18next.t"]
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "fullKeyFunctions":[{"functionName":"translate"}]
             }"#,
         )
         .unwrap();
@@ -1154,10 +1386,10 @@ mod tests {
         )
         .unwrap();
         let key = CanonicalKey::new("Page.Login.submit", ".").unwrap();
-        assert_eq!(workspace.snapshot().occurrences(&key).len(), 1);
+        assert_eq!(workspace.snapshot().occurrences(None, &key).len(), 1);
         let uri = Url::from_file_path(source_path).unwrap();
         workspace.update_text(uri, "i18next.t('Page.Login.cancel')".into(), Some(1));
-        assert!(workspace.snapshot().occurrences(&key).is_empty());
+        assert!(workspace.snapshot().occurrences(None, &key).is_empty());
     }
 
     #[test]
@@ -1165,7 +1397,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(
             temp.path().join("locale-breeze.json"),
-            r#"{"dictionaries":"translation.{locale}.json","defaultLocale":"en","scopedFunctions":["useScopedTranslation"],"translationMethods":["t"],"fullKeyFunctions":["i18next.t"]}"#,
+            r#"{"dictionaries":"translation.{locale}.json","defaultLocale":"en","scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "fullKeyFunctions":[{"functionName":"translate"}]}"#,
         )
         .unwrap();
         std::fs::write(temp.path().join("translation.en.json"), "{ invalid").unwrap();
@@ -1189,9 +1422,8 @@ mod tests {
               "dictionaries":"translation.{locale}.json",
               "defaultLocale":"en",
               "keySeparator":".",
-              "scopedFunctions":["useScopedTranslation"],
-              "translationMethods":["t"],
-              "fullKeyFunctions":["i18next.t"]
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "fullKeyFunctions":[{"functionName":"translate"}]
             }"#,
         )
         .unwrap();
@@ -1212,7 +1444,7 @@ mod tests {
 
         workspace.update_text(uri, r#"{"Page":{"new":"New"}}"#.into(), Some(2));
         let key = CanonicalKey::new("Page.new", ".").unwrap();
-        assert_eq!(workspace.snapshot().dictionary_entries(&key).len(), 1);
+        assert_eq!(workspace.snapshot().dictionary_entries(None, &key).len(), 1);
     }
 
     #[test]
@@ -1224,9 +1456,8 @@ mod tests {
               "dictionaries":"translation.{locale}.json",
               "defaultLocale":"en",
               "keySeparator":".",
-              "scopedFunctions":["useScopedTranslation"],
-              "translationMethods":["t"],
-              "fullKeyFunctions":["i18next.t"]
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "fullKeyFunctions":[{"functionName":"translate"}]
             }"#,
         )
         .unwrap();
@@ -1256,5 +1487,151 @@ mod tests {
             workspace.snapshot().text(&uri),
             Some(r#"{"Page":{"key":"Reloaded"}}"#)
         );
+    }
+
+    #[test]
+    fn keeps_same_named_keys_separate_across_namespaces() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("locale-breeze.json"),
+            r#"{
+          "dictionaries":"locales/{locale}/{namespace}.json",
+          "defaultLocale":"en", "defaultNamespace":"common",
+          "scopedFunctions":[{"functionName":"useScopedTranslation","defaultNamespace":"home","translationMethods":["t"]}],
+          "fullKeyFunctions":[{"functionName":"translate","defaultNamespace":"home"}]
+        }"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(temp.path().join("locales/en")).unwrap();
+        std::fs::write(
+            temp.path().join("locales/en/common.json"),
+            r#"{"title":"Common"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("locales/en/home.json"),
+            r#"{"title":"Home","section":{"heading":"Heading"}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(temp.path().join("src")).unwrap();
+        std::fs::write(
+            temp.path().join("src/app.tsx"),
+            "const {t}=useScopedTranslation('section'); t('heading'); translate('title'); i18next.t('title');",
+        )
+        .unwrap();
+        let workspace = WorkspaceIndex::load(
+            temp.path().to_path_buf(),
+            &temp.path().join("locale-breeze.json"),
+        )
+        .unwrap();
+        let key = CanonicalKey::new("title", ".").unwrap();
+        assert_eq!(
+            workspace
+                .snapshot()
+                .dictionary_entries(Some("common"), &key)[0]
+                .value
+                .as_deref(),
+            Some("Common")
+        );
+        assert_eq!(
+            workspace.snapshot().dictionary_entries(Some("home"), &key)[0]
+                .value
+                .as_deref(),
+            Some("Home")
+        );
+        assert_eq!(
+            workspace.snapshot().occurrences(Some("common"), &key).len(),
+            1
+        );
+        assert_eq!(
+            workspace.snapshot().occurrences(Some("home"), &key).len(),
+            1
+        );
+        let completion_uri = Url::from_file_path(temp.path().join("src/completion.tsx")).unwrap();
+        let completion_text = "const {t}=useScopedTranslation('se";
+        workspace.update_text(completion_uri.clone(), completion_text.into(), Some(1));
+        let context = workspace
+            .snapshot()
+            .completion_context_at(&completion_uri, completion_text.len(), workspace.config())
+            .unwrap();
+        assert!(
+            matches!(context, CompletionContext::Scope { namespace: Some(ref namespace), ref query } if namespace == "home" && query == "se")
+        );
+        let (candidates, _) = workspace.snapshot().completions(&context, "en", ".", 20);
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.key == "section")
+        );
+
+        let full_key_text = "translate('ti";
+        workspace.update_text(completion_uri.clone(), full_key_text.into(), Some(2));
+        let context = workspace
+            .snapshot()
+            .completion_context_at(&completion_uri, full_key_text.len(), workspace.config())
+            .unwrap();
+        assert!(
+            matches!(context, CompletionContext::FullKey { namespace: Some(ref namespace), ref query } if namespace == "home" && query == "ti")
+        );
+        let (candidates, _) = workspace.snapshot().completions(&context, "en", ".", 20);
+        assert!(candidates.iter().any(|candidate| {
+            candidate.key == "title" && candidate.detail.as_deref() == Some("Home")
+        }));
+        assert!(
+            !candidates
+                .iter()
+                .any(|candidate| candidate.detail.as_deref() == Some("Common"))
+        );
+    }
+
+    #[test]
+    fn rejects_missing_global_and_function_namespace_dictionaries() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("locales/en")).unwrap();
+        std::fs::write(
+            temp.path().join("locales/en/common.json"),
+            r#"{"title":"Common"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("locales/en/home.json"),
+            r#"{"title":"Home"}"#,
+        )
+        .unwrap();
+        let config_path = temp.path().join("locale-breeze.json");
+
+        std::fs::write(
+            &config_path,
+            r#"{
+              "dictionaries":"locales/{locale}/{namespace}.json",
+              "defaultLocale":"en",
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "fullKeyFunctions":[{"functionName":"translate"}]
+            }"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            WorkspaceIndex::load(temp.path().to_owned(), &config_path),
+            Err(crate::ConfigError::MissingDefaultNamespace)
+        ));
+
+        std::fs::write(
+            &config_path,
+            r#"{
+              "dictionaries":"locales/{locale}/{namespace}.json",
+              "defaultLocale":"en",
+              "defaultNamespace":"common",
+              "scopedFunctions":[{"functionName":"useScopedTranslation","defaultNamespace":"missing","translationMethods":["t"]}],
+              "fullKeyFunctions":[{"functionName":"translate"}]
+            }"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            WorkspaceIndex::load(temp.path().to_owned(), &config_path),
+            Err(crate::ConfigError::MissingNamespaceDictionary { field, namespace, locale })
+                if field == "scopedFunctions[useScopedTranslation].defaultNamespace"
+                    && namespace == "missing"
+                    && locale == "en"
+        ));
     }
 }

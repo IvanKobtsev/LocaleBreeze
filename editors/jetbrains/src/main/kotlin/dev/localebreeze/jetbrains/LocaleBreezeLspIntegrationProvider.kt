@@ -123,6 +123,11 @@ private class LocaleBreezeLsp4jClient(
 
     @JsonNotification("localeBreeze/workspaceStatus")
     fun workspaceStatus(status: LocaleBreezeWorkspaceStatus) {
+        val settings = LocaleBreezeSettings.getInstance(project)
+        if (settings.configLocation() == LocaleBreezeSettings.ConfigLocation.WORKSPACE_ROOT && status.configPath.isNotBlank()) {
+            settings.state.configPath = status.configPath
+        }
+        project.service<LocaleBreezeContentRoots>().reconcile(status.dictionaryRootPath)
         project.service<LocaleBreezeWarningCoordinator>().status(status)
     }
 }

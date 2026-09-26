@@ -4,22 +4,40 @@ mod index;
 mod line_index;
 mod source;
 
-pub use config::{Config, ConfigError, DictionaryPattern};
+pub use config::{
+    Config, ConfigError, DictionaryIdentity, DictionaryPattern, FullKeyFunctionConfig,
+    ScopedFunctionConfig,
+};
 pub use dictionary::{
     DictionaryEntry, DictionaryError, EntryKind, parse_dictionary, parse_dictionary_ignoring,
+    parse_dictionary_in_namespace,
 };
 pub use index::{
     CompletionCandidate, CompletionContext, DictionaryIssue, IndexSnapshot, WorkspaceIndex,
     WorkspacePreferences,
 };
 pub use line_index::LineIndex;
-pub use source::{OccurrenceKind, ScopeBinding, SourceOccurrence, analyze_source};
+pub use source::{
+    OccurrenceKind, ScopeBinding, SourceOccurrence, analyze_source, analyze_source_with_namespace,
+};
 
 use std::fmt;
 use std::ops::Range;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CanonicalKey(String);
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct QualifiedKey {
+    pub namespace: Option<String>,
+    pub key: CanonicalKey,
+}
+
+impl QualifiedKey {
+    pub fn new(namespace: Option<String>, key: CanonicalKey) -> Self {
+        Self { namespace, key }
+    }
+}
 
 impl CanonicalKey {
     pub fn new(value: impl Into<String>, separator: &str) -> Option<Self> {

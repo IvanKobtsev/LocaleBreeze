@@ -4,10 +4,12 @@ import com.intellij.icons.AllIcons
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.components.service
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
+import com.intellij.codeInsight.daemon.DaemonCodeAnalyzer
 import com.intellij.openapi.fileChooser.FileChooser
 import com.intellij.openapi.fileChooser.FileChooserDescriptor
 import com.intellij.openapi.options.ShowSettingsUtil
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.util.IconLoader
 import com.intellij.openapi.util.text.StringUtil
 import com.intellij.openapi.vfs.LocalFileSystem
@@ -261,7 +263,46 @@ private class LocaleBreezeToolWindowPanel(
             add(metric(status.unusedKeyCount.toString(), "Unused keys"))
             add(metric(status.totalKeyCount.toString(), "Default-locale keys"))
             add(metric(status.dictionaryFileCount.toString(), "Dictionaries"))
+            if (dictionaryRootNeedsAttachment(status)) {
+                add(Box.createVerticalStrut(12))
+                add(WrappingText("The dictionary directory is outside this WebStorm project. Attach it to enable standard editor diagnostics."))
+                add(Box.createVerticalStrut(8))
+                add(cardButton("Attach dictionary directory", primary = true) {
+                    attachDictionaryRoot(status)
+                })
+            }
         }
+    }
+
+    private fun dictionaryRootNeedsAttachment(status: LocaleBreezeWorkspaceStatus): Boolean {
+        if (status.dictionaryRootPath.isBlank()) return false
+        val path = runCatching { Path.of(status.dictionaryRootPath) }.getOrNull() ?: return false
+        return !project.service<LocaleBreezeContentRoots>().isAttached(path)
+    }
+
+    private fun attachDictionaryRoot(status: LocaleBreezeWorkspaceStatus) {
+        val root = runCatching { Path.of(status.dictionaryRootPath).toAbsolutePath().normalize() }.getOrNull()
+            ?.let { LocalFileSystem.getInstance().refreshAndFindFileByNioFile(it) }
+            ?: return
+        if (!project.service<LocaleBreezeContentRoots>().attach(root.toNioPath())) {
+            Messages.showErrorDialog(
+                project,
+                "WebStorm could not attach the dictionary directory to this project.",
+                "LocaleBreeze",
+            )
+            return
+        }
+        runCatching { Path.of(status.configPath).toAbsolutePath().normalize() }
+            .getOrNull()
+            ?.takeIf { java.nio.file.Files.isRegularFile(it) }
+            ?.let { configPath ->
+                LocaleBreezeSettings.getInstance(project).state.apply {
+                    this.configPath = configPath.toString()
+                    configLocation = LocaleBreezeSettings.ConfigLocation.CUSTOM_PATH.name
+                }
+            }
+        DaemonCodeAnalyzer.getInstance(project).restart()
+        refresh()
     }
 
     private fun renderProblems(state: LocaleBreezeDashboardState) {

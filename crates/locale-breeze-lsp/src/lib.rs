@@ -1,7 +1,7 @@
 use anyhow::Result;
 use locale_breeze_core::{
     ByteRange, CanonicalKey, ConfigError, DictionaryIssue, EntryKind, IndexSnapshot, LineIndex,
-    OccurrenceKind, WorkspaceIndex, WorkspacePreferences,
+    OccurrenceKind, QualifiedKey, WorkspaceIndex, WorkspacePreferences,
 };
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::*;
@@ -130,6 +130,7 @@ struct WorkspaceStatus {
     config_path: String,
     default_locale: String,
     default_dictionary_path: Option<String>,
+    dictionary_root_path: String,
     dictionary_file_count: usize,
     total_key_count: usize,
     unused_key_count: usize,
@@ -150,14 +151,28 @@ impl Server {
 
     #[allow(deprecated)]
     fn initialize(&mut self, connection: &Connection, params: &InitializeParams) {
-        let roots: Vec<Url> = params
+        let roots: Vec<PathBuf> = params
             .workspace_folders
             .as_ref()
-            .map(|folders| folders.iter().map(|f| f.uri.clone()).collect())
-            .or_else(|| params.root_uri.clone().map(|u| vec![u]))
+            .map(|folders| {
+                folders
+                    .iter()
+                    .filter_map(|folder| folder.uri.to_file_path().ok())
+                    .collect()
+            })
+            .or_else(|| {
+                params
+                    .root_uri
+                    .as_ref()
+                    .and_then(|uri| uri.to_file_path().ok())
+                    .map(|root| vec![root])
+            })
             .unwrap_or_default();
+        let roots = initialization_roots(roots, self.config_override.as_deref());
         for root in roots {
-            self.add_workspace(connection, root);
+            if let Ok(uri) = Url::from_directory_path(root) {
+                self.add_workspace(connection, uri);
+            }
         }
     }
 
@@ -174,6 +189,7 @@ impl Server {
         match WorkspaceIndex::load_with_preferences(root.clone(), &config_path, self.preferences) {
             Ok(workspace) => {
                 publish_workspace_issue(connection, WorkspaceIssue::clear());
+                clear_uri_diagnostic(connection, &config_path, &self.published_diagnostics);
                 let workspace = Arc::new(workspace);
                 let watched = workspace.clone();
                 let watched_config_path = config_path.clone();
@@ -255,6 +271,12 @@ impl Server {
                 }
             }
             Err(error) => {
+                publish_config_diagnostic(
+                    connection,
+                    &config_path,
+                    &error,
+                    &self.published_diagnostics,
+                );
                 publish_workspace_issue(
                     connection,
                     WorkspaceIssue::from_config_error(&error, &config_path),
@@ -509,20 +531,42 @@ impl Server {
         else {
             return Ok(None);
         };
+        if snapshot
+            .occurrence_at(&uri, offset)
+            .is_some_and(|occurrence| occurrence.kind == OccurrenceKind::NamespaceDeclaration)
+        {
+            let locations = snapshot
+                .dictionary_entries_all()
+                .filter(|entry| {
+                    entry.namespace.as_deref() == key.namespace.as_deref()
+                        && entry.locale == workspace.config().default_locale
+                })
+                .take(1)
+                .filter_map(|entry| location(&snapshot, &entry.uri, &entry.key_range))
+                .collect::<Vec<_>>();
+            return Ok((!locations.is_empty()).then_some(GotoDefinitionResponse::Array(locations)));
+        }
         let locations = if snapshot.dictionary_at(&uri, offset).is_some() {
             let is_scope = snapshot
-                .dictionary_entries(&key)
+                .dictionary_entries(key.namespace.as_deref(), &key.key)
                 .iter()
                 .any(|entry| entry.kind == EntryKind::Object);
             let occurrences: Vec<_> = if is_scope {
-                snapshot.scope_occurrences(&key, &workspace.config().key_separator, 32)
+                snapshot.scope_occurrences(
+                    key.namespace.as_deref(),
+                    &key.key,
+                    &workspace.config().key_separator,
+                    32,
+                )
             } else {
                 snapshot
-                    .occurrences(&key)
+                    .occurrences(key.namespace.as_deref(), &key.key)
                     .iter()
-                    .chain(
-                        snapshot.dynamic_scope_occurrences(&key, &workspace.config().key_separator),
-                    )
+                    .chain(snapshot.dynamic_scope_occurrences(
+                        key.namespace.as_deref(),
+                        &key.key,
+                        &workspace.config().key_separator,
+                    ))
                     .collect()
             };
             occurrences
@@ -531,7 +575,7 @@ impl Server {
                 .collect::<Vec<_>>()
         } else {
             snapshot
-                .dictionary_entries(&key)
+                .dictionary_entries(key.namespace.as_deref(), &key.key)
                 .iter()
                 .filter(|entry| entry.locale == workspace.config().default_locale)
                 .filter_map(|entry| location(&snapshot, &entry.uri, &entry.key_range))
@@ -554,14 +598,18 @@ impl Server {
         };
         let default_locale = &workspace.config().default_locale;
         let default_entry = snapshot
-            .dictionary_entries(&key)
+            .dictionary_entries(key.namespace.as_deref(), &key.key)
             .iter()
             .find(|entry| entry.locale == *default_locale);
         let text = match default_entry {
             Some(entry) if entry.kind == EntryKind::Leaf => entry.value.clone().unwrap_or_default(),
             Some(entry) if entry.kind == EntryKind::Object => {
                 let mut children = snapshot
-                    .direct_dictionary_children(&key, &workspace.config().key_separator)
+                    .direct_dictionary_children(
+                        &key.key,
+                        key.namespace.as_deref(),
+                        &workspace.config().key_separator,
+                    )
                     .filter(|child| child.locale == *default_locale)
                     .collect::<Vec<_>>();
                 children.sort_by(|left, right| {
@@ -579,7 +627,7 @@ impl Server {
                     .map(|child| {
                         let relative = child
                             .key
-                            .relative_to(&key, &workspace.config().key_separator)
+                            .relative_to(&key.key, &workspace.config().key_separator)
                             .unwrap_or(child.key.as_str());
                         match child.value.as_deref() {
                             Some(value) => format!("- `{relative}`: {value}"),
@@ -592,7 +640,7 @@ impl Server {
                 }
                 preview.join("\n")
             }
-            _ => format!("Translation key `{}` does not exist.", key.as_str()),
+            _ => format!("Translation key `{}` does not exist.", key.key.as_str()),
         };
         Ok(Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
@@ -616,7 +664,7 @@ impl Server {
             return Ok(None);
         };
         let is_scope = snapshot
-            .dictionary_entries(&key)
+            .dictionary_entries(key.namespace.as_deref(), &key.key)
             .iter()
             .any(|e| e.kind == EntryKind::Object)
             || snapshot
@@ -626,12 +674,21 @@ impl Server {
                 )
                 .is_some_and(|o| o.kind == OccurrenceKind::ScopeDeclaration);
         let occurrences: Vec<_> = if is_scope {
-            snapshot.scope_occurrences(&key, &workspace.config().key_separator, 32)
+            snapshot.scope_occurrences(
+                key.namespace.as_deref(),
+                &key.key,
+                &workspace.config().key_separator,
+                32,
+            )
         } else {
             snapshot
-                .occurrences(&key)
+                .occurrences(key.namespace.as_deref(), &key.key)
                 .iter()
-                .chain(snapshot.dynamic_scope_occurrences(&key, &workspace.config().key_separator))
+                .chain(snapshot.dynamic_scope_occurrences(
+                    key.namespace.as_deref(),
+                    &key.key,
+                    &workspace.config().key_separator,
+                ))
                 .collect()
         };
         let mut locations: Vec<_> = occurrences
@@ -641,7 +698,7 @@ impl Server {
         if params.context.include_declaration {
             locations.extend(
                 snapshot
-                    .dictionary_entries(&key)
+                    .dictionary_entries(key.namespace.as_deref(), &key.key)
                     .iter()
                     .filter_map(|e| location(&snapshot, &e.uri, &e.key_range)),
             );
@@ -668,7 +725,12 @@ impl Server {
                     position.position,
                     &workspace.config().key_separator,
                 )
-                .map(|key| Value::String(key.as_str().to_owned())))
+                .map(|key| {
+                    Value::String(key.namespace.map_or_else(
+                        || key.key.as_str().to_owned(),
+                        |namespace| format!("{namespace}:{}", key.key),
+                    ))
+                }))
             }
             REFRESH_DOCUMENT_COMMAND => {
                 let Some(uri) = params.arguments.first() else {
@@ -703,7 +765,7 @@ impl Server {
                     .filter_map(|occurrence| {
                         let range = location(&snapshot, &occurrence.uri, &occurrence.range)?.range;
                         let declaration_exists = snapshot
-                            .dictionary_entries(&occurrence.key)
+                            .dictionary_entries(occurrence.namespace.as_deref(), &occurrence.key)
                             .iter()
                             .any(|entry| entry.locale == *default_locale);
                         let can_add = matches!(
@@ -712,6 +774,7 @@ impl Server {
                         ) && !declaration_exists
                             && insertion_target(
                                 &snapshot,
+                                occurrence.namespace.as_deref(),
                                 &occurrence.key,
                                 default_locale,
                                 &workspace.config().key_separator,
@@ -719,12 +782,15 @@ impl Server {
                             .is_some();
                         Some(DocumentKeyInfo {
                             range,
-                            key: occurrence.key.as_str().to_owned(),
+                            key: occurrence.namespace.as_ref().map_or_else(
+                                || occurrence.key.as_str().to_owned(),
+                                |namespace| format!("{namespace}:{}", occurrence.key),
+                            ),
                             declaration_exists,
                             can_add,
                         })
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
                 Ok(Some(serde_json::to_value(DocumentKeysResult {
                     version: snapshot.version(&document.uri),
                     keys,
@@ -755,7 +821,7 @@ impl Server {
                 };
                 if occurrence.kind == OccurrenceKind::DynamicScope
                     || snapshot
-                        .dictionary_entries(&occurrence.key)
+                        .dictionary_entries(occurrence.namespace.as_deref(), &occurrence.key)
                         .iter()
                         .any(|entry| entry.locale == workspace.config().default_locale)
                 {
@@ -763,6 +829,7 @@ impl Server {
                 }
                 let Some(edit) = prepare_insertion(
                     &snapshot,
+                    occurrence.namespace.as_deref(),
                     &occurrence.key,
                     &workspace.config().default_locale,
                     &workspace.config().key_separator,
@@ -779,6 +846,7 @@ impl Server {
 
 fn insertion_target(
     snapshot: &IndexSnapshot,
+    namespace: Option<&str>,
     key: &CanonicalKey,
     locale: &str,
     separator: &str,
@@ -788,7 +856,7 @@ fn insertion_target(
             .collect::<Vec<_>>();
     if ancestors.iter().any(|ancestor| {
         snapshot
-            .dictionary_entries(ancestor)
+            .dictionary_entries(namespace, ancestor)
             .iter()
             .any(|entry| entry.locale == locale && entry.kind == EntryKind::Leaf)
     }) {
@@ -796,7 +864,7 @@ fn insertion_target(
     }
     let mut files = snapshot
         .dictionary_entries_all()
-        .filter(|entry| entry.locale == locale)
+        .filter(|entry| entry.locale == locale && entry.namespace.as_deref() == namespace)
         .map(|entry| entry.uri.clone())
         .collect::<Vec<_>>();
     files.sort_by(|left, right| left.as_str().cmp(right.as_str()));
@@ -806,7 +874,7 @@ fn insertion_target(
         .map(|uri| {
             let ancestor = ancestors.iter().find_map(|ancestor| {
                 snapshot
-                    .dictionary_entries(ancestor)
+                    .dictionary_entries(namespace, ancestor)
                     .iter()
                     .find(|entry| {
                         entry.locale == locale
@@ -834,12 +902,13 @@ fn insertion_target(
 
 fn prepare_insertion(
     snapshot: &IndexSnapshot,
+    namespace: Option<&str>,
     key: &CanonicalKey,
     locale: &str,
     separator: &str,
     value: &str,
 ) -> Option<PreparedEdit> {
-    let (uri, ancestor) = insertion_target(snapshot, key, locale, separator)?;
+    let (uri, ancestor) = insertion_target(snapshot, namespace, key, locale, separator)?;
     let text = snapshot.text(&uri)?;
     let (object_start, object_end, ancestor_key) = match &ancestor {
         Some(entry) => (
@@ -980,7 +1049,7 @@ fn key_at_position(
     uri: &Url,
     position: Position,
     separator: &str,
-) -> Option<CanonicalKey> {
+) -> Option<QualifiedKey> {
     let offset = position_offset(snapshot, uri, position)?;
     snapshot
         .occurrence_at(uri, offset)
@@ -1001,12 +1070,17 @@ fn key_at_position(
                 .take(segment_index + 1)
                 .collect::<Vec<_>>()
                 .join(separator);
-            match scope {
+            let key = match scope {
                 Some(scope) => CanonicalKey::join(scope, &prefix, separator),
                 None => CanonicalKey::new(prefix, separator),
-            }
+            }?;
+            Some(QualifiedKey::new(occurrence.namespace.clone(), key))
         })
-        .or_else(|| snapshot.dictionary_at(uri, offset).map(|e| e.key.clone()))
+        .or_else(|| {
+            snapshot
+                .dictionary_at(uri, offset)
+                .map(|e| QualifiedKey::new(e.namespace.clone(), e.key.clone()))
+        })
 }
 
 fn location(snapshot: &IndexSnapshot, uri: &Url, range: &ByteRange) -> Option<Location> {
@@ -1041,6 +1115,30 @@ fn apply_changes(mut text: String, changes: &[TextDocumentContentChangeEvent]) -
 fn same_path(left: &std::path::Path, right: &std::path::Path) -> bool {
     left.to_string_lossy()
         .eq_ignore_ascii_case(&right.to_string_lossy())
+}
+
+fn initialization_roots(
+    roots: Vec<PathBuf>,
+    config_override: Option<&std::path::Path>,
+) -> Vec<PathBuf> {
+    if let Some(config_path) = config_override {
+        let preferred = roots
+            .iter()
+            .position(|root| config_path.starts_with(root))
+            .unwrap_or(0);
+        return roots.into_iter().nth(preferred).into_iter().collect();
+    }
+
+    let configured: Vec<_> = roots
+        .iter()
+        .filter(|root| root.join("locale-breeze.json").is_file())
+        .cloned()
+        .collect();
+    if configured.is_empty() {
+        roots
+    } else {
+        configured
+    }
 }
 
 #[cfg(not(windows))]
@@ -1115,8 +1213,7 @@ fn diagnostic_notifications(
     }
     for entry in snapshot.default_locale_leaf_entries(&workspace.config().default_locale) {
         if workspace.preferences().show_unused_keys
-            && !snapshot
-                .is_leaf_key_used_with_separator(&entry.key, &workspace.config().key_separator)
+            && !snapshot.is_leaf_entry_used(entry, &workspace.config().key_separator)
             && let Some(range) = location(&snapshot, &entry.uri, &entry.key_range).map(|l| l.range)
         {
             by_uri
@@ -1173,6 +1270,70 @@ fn publish_diagnostics(
         if let Some(trace) = diagnostic_trace_notification(&notification) {
             let _ = connection.sender.send(Message::Notification(trace));
         }
+        let _ = connection.sender.send(Message::Notification(notification));
+    }
+}
+
+fn publish_config_diagnostic(
+    connection: &Connection,
+    config_path: &std::path::Path,
+    error: &ConfigError,
+    published: &Mutex<HashMap<Url, Vec<Diagnostic>>>,
+) {
+    let Ok(uri) = Url::from_file_path(config_path) else {
+        return;
+    };
+    let issue = WorkspaceIssue::from_config_error(error, config_path);
+    let line = issue.line.unwrap_or(1).saturating_sub(1) as u32;
+    let character = issue.column.unwrap_or(1).saturating_sub(1) as u32;
+    let diagnostic = Diagnostic {
+        range: Range::new(
+            Position::new(line, character),
+            Position::new(line, character.saturating_add(1)),
+        ),
+        severity: Some(DiagnosticSeverity::ERROR),
+        code: Some(NumberOrString::String(issue.code.into())),
+        code_description: None,
+        source: Some("locale-breeze".into()),
+        message: issue.summary,
+        related_information: None,
+        tags: None,
+        data: None,
+    };
+    let diagnostics = vec![diagnostic];
+    let mut cache = published
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if cache.get(&uri) == Some(&diagnostics) {
+        return;
+    }
+    cache.insert(uri.clone(), diagnostics.clone());
+    drop(cache);
+    let notification = Notification::new(
+        "textDocument/publishDiagnostics".into(),
+        PublishDiagnosticsParams::new(uri, diagnostics, None),
+    );
+    let _ = connection.sender.send(Message::Notification(notification));
+}
+
+fn clear_uri_diagnostic(
+    connection: &Connection,
+    path: &std::path::Path,
+    published: &Mutex<HashMap<Url, Vec<Diagnostic>>>,
+) {
+    let Ok(uri) = Url::from_file_path(path) else {
+        return;
+    };
+    let removed = published
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&uri)
+        .is_some();
+    if removed {
+        let notification = Notification::new(
+            "textDocument/publishDiagnostics".into(),
+            PublishDiagnosticsParams::new(uri, Vec::new(), None),
+        );
         let _ = connection.sender.send(Message::Notification(notification));
     }
 }
@@ -1278,8 +1439,8 @@ impl WorkspaceStatus {
             .filter_map(|file| file.uri.to_file_path().ok())
             .filter_map(|path| {
                 pattern
-                    .locale_for(workspace.root(), &path)
-                    .map(|locale| (locale, path))
+                    .identity_for(workspace.root(), &path)
+                    .map(|identity| (identity, path))
             })
             .collect::<Vec<_>>();
         dictionary_paths.sort_by(|left, right| left.1.cmp(&right.1));
@@ -1287,15 +1448,17 @@ impl WorkspaceStatus {
 
         let default_dictionary_path = dictionary_paths
             .iter()
-            .find(|(locale, _)| locale == &workspace.config().default_locale)
+            .find(|(identity, _)| {
+                identity.locale == workspace.config().default_locale
+                    && identity.namespace == workspace.config().default_namespace
+            })
             .map(|(_, path)| path.display().to_string());
 
         let mut seen_keys = HashSet::new();
         let mut unused_key_count = 0;
         for entry in snapshot.default_locale_leaf_entries(&workspace.config().default_locale) {
-            if seen_keys.insert(entry.key.as_str().to_owned())
-                && !snapshot
-                    .is_leaf_key_used_with_separator(&entry.key, &workspace.config().key_separator)
+            if seen_keys.insert((entry.namespace.clone(), entry.key.as_str().to_owned()))
+                && !snapshot.is_leaf_entry_used(entry, &workspace.config().key_separator)
             {
                 unused_key_count += 1;
             }
@@ -1307,6 +1470,7 @@ impl WorkspaceStatus {
             config_path: config_path.display().to_string(),
             default_locale: workspace.config().default_locale.clone(),
             default_dictionary_path,
+            dictionary_root_path: workspace.dictionary_root().display().to_string(),
             dictionary_file_count: dictionary_paths.len(),
             total_key_count: seen_keys.len(),
             unused_key_count,
@@ -1359,19 +1523,28 @@ impl WorkspaceIssue {
                 None,
                 None,
             ),
-            ConfigError::Json(source) => (
-                "config_json",
-                "LocaleBreeze configuration contains invalid JSON".into(),
-                "Correct the JSON syntax, then save the file. LocaleBreeze will retry automatically.".into(),
-                Some(source.line()),
-                Some(source.column()),
-            ),
+            ConfigError::Json(source) => {
+                let (code, summary, remediation) = json_config_error_details(source);
+                (
+                    code,
+                    summary,
+                    remediation,
+                    Some(source.line()),
+                    Some(source.column()),
+                )
+            }
             ConfigError::LocaleToken => (
                 "config_dictionary_pattern",
                 "The dictionary pattern is invalid".into(),
                 "Set `dictionaries` to a relative pattern containing exactly one `{locale}` token, for example `public/dictionaries/translation.{locale}.json`.".into(),
                 None,
                 None,
+            ),
+            ConfigError::NamespaceToken => (
+                "config_dictionary_pattern",
+                "The dictionary namespace pattern is invalid".into(),
+                "Use at most one `{namespace}` token in `dictionaries`.".into(),
+                None, None,
             ),
             ConfigError::AbsoluteDictionaryPattern => (
                 "config_dictionary_pattern",
@@ -1405,6 +1578,32 @@ impl WorkspaceIssue {
                 "dictionary_default_missing",
                 format!("No dictionary was found for the default locale `{locale}`"),
                 "Check `defaultLocale`, the `dictionaries` pattern, and that the matching dictionary file exists and contains valid JSON.".into(),
+                None,
+                None,
+            ),
+            ConfigError::MissingDefaultNamespace => (
+                "dictionary_default_namespace_missing",
+                "LocaleBreeze cannot determine the default namespace".into(),
+                "Set `defaultNamespace` when the dictionary pattern matches more than one namespace.".into(),
+                None, None,
+            ),
+            ConfigError::MissingNamespaceDictionary {
+                field,
+                namespace,
+                locale,
+            } => (
+                "dictionary_namespace_missing",
+                format!(
+                    "Namespace `{namespace}` configured by `{field}` has no dictionary for locale `{locale}`"
+                ),
+                "Correct the namespace override or add its default-locale dictionary file.".into(),
+                None,
+                None,
+            ),
+            ConfigError::DuplicateFunction { field, name } => (
+                "config_value",
+                format!("Function `{name}` is configured more than once in `{field}`"),
+                "Keep one configuration entry for each function name.".into(),
                 None,
                 None,
             ),
@@ -1450,9 +1649,162 @@ impl WorkspaceIssue {
     }
 }
 
+fn json_config_error_details(error: &serde_json::Error) -> (&'static str, String, String) {
+    if matches!(
+        error.classify(),
+        serde_json::error::Category::Syntax | serde_json::error::Category::Eof
+    ) {
+        return (
+            "config_json",
+            "LocaleBreeze configuration contains invalid JSON".into(),
+            "Correct the JSON syntax, then save the file. LocaleBreeze will retry automatically."
+                .into(),
+        );
+    }
+
+    let message = error.to_string();
+    let message = message
+        .rsplit_once(" at line ")
+        .map_or(message.as_str(), |(message, _)| message);
+    let summary = if let Some(expected) = typescript_config_expectation(message) {
+        format!("Invalid LocaleBreeze configuration value. Expected {expected}")
+    } else if let Some(field) = quoted_serde_field(message, "unknown field `") {
+        format!("Unknown LocaleBreeze configuration field `{field}`")
+    } else if let Some(field) = quoted_serde_field(message, "missing field `") {
+        format!("Missing required LocaleBreeze configuration field `{field}`")
+    } else if let Some(field) = quoted_serde_field(message, "duplicate field `") {
+        format!("Duplicate LocaleBreeze configuration field `{field}`")
+    } else {
+        format!("Invalid LocaleBreeze configuration: {message}")
+    };
+    (
+        "config_schema",
+        summary,
+        "Correct the configuration value or field, then save the file. LocaleBreeze will retry automatically."
+            .into(),
+    )
+}
+
+fn typescript_config_expectation(message: &str) -> Option<&'static str> {
+    if message.contains("expected struct ScopedFunctionConfig") {
+        Some("{ functionName: string; defaultNamespace?: string; translationMethods: string[] }")
+    } else if message.contains("expected struct FullKeyFunctionConfig") {
+        Some("{ functionName: string; defaultNamespace?: string }")
+    } else {
+        None
+    }
+}
+
+fn quoted_serde_field<'a>(message: &'a str, prefix: &str) -> Option<&'a str> {
+    message
+        .strip_prefix(prefix)?
+        .split_once('`')
+        .map(|(field, _)| field)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn distinguishes_configuration_shape_errors_from_invalid_json() {
+        let unknown = serde_json::from_str::<locale_breeze_core::Config>(
+            r#"{
+              "dictionaries":"translation.{locale}.json",
+              "defaultLocale":"en",
+              "scopedFunctions":[],
+              "fullKeyFunctions":[],
+              "unexpected":true
+            }"#,
+        )
+        .unwrap_err();
+        let issue = WorkspaceIssue::from_config_error(
+            &ConfigError::Json(unknown),
+            std::path::Path::new("locale-breeze.json"),
+        );
+        assert_eq!(issue.code, "config_schema");
+        assert_eq!(
+            issue.summary,
+            "Unknown LocaleBreeze configuration field `unexpected`"
+        );
+
+        let wrong_scoped_function = serde_json::from_str::<locale_breeze_core::Config>(
+            r#"{
+              "dictionaries":"translation.{locale}.json",
+              "defaultLocale":"en",
+              "scopedFunctions":["useScopedTranslation"],
+              "fullKeyFunctions":[]
+            }"#,
+        )
+        .unwrap_err();
+        let issue = WorkspaceIssue::from_config_error(
+            &ConfigError::Json(wrong_scoped_function),
+            std::path::Path::new("locale-breeze.json"),
+        );
+        assert_eq!(
+            issue.summary,
+            "Invalid LocaleBreeze configuration value. Expected { functionName: string; defaultNamespace?: string; translationMethods: string[] }"
+        );
+
+        let syntax = serde_json::from_str::<locale_breeze_core::Config>("{").unwrap_err();
+        let issue = WorkspaceIssue::from_config_error(
+            &ConfigError::Json(syntax),
+            std::path::Path::new("locale-breeze.json"),
+        );
+        assert_eq!(issue.code, "config_json");
+        assert_eq!(
+            issue.summary,
+            "LocaleBreeze configuration contains invalid JSON"
+        );
+    }
+
+    #[test]
+    fn publishes_and_clears_config_file_diagnostics() {
+        let (server, client) = Connection::memory();
+        let published = Mutex::new(HashMap::new());
+        let path = std::env::temp_dir().join("locale-breeze-diagnostic-test.json");
+        let source = serde_json::from_str::<locale_breeze_core::Config>(r#"{"unexpected":true}"#)
+            .unwrap_err();
+
+        publish_config_diagnostic(&server, &path, &ConfigError::Json(source), &published);
+        let Message::Notification(notification) = client.receiver.recv().unwrap() else {
+            panic!("expected diagnostic notification");
+        };
+        let params =
+            serde_json::from_value::<PublishDiagnosticsParams>(notification.params).unwrap();
+        assert_eq!(params.diagnostics.len(), 1);
+        assert_eq!(
+            params.diagnostics[0].code,
+            Some(NumberOrString::String("config_schema".into()))
+        );
+        assert_eq!(
+            params.diagnostics[0].message,
+            "Unknown LocaleBreeze configuration field `unexpected`"
+        );
+
+        clear_uri_diagnostic(&server, &path, &published);
+        let Message::Notification(notification) = client.receiver.recv().unwrap() else {
+            panic!("expected clearing notification");
+        };
+        let params =
+            serde_json::from_value::<PublishDiagnosticsParams>(notification.params).unwrap();
+        assert!(params.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn initialization_ignores_attached_content_roots_without_a_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("frontend").join("src");
+        let dictionaries = temp.path().join("frontend").join("translations");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&dictionaries).unwrap();
+        std::fs::write(project.join("locale-breeze.json"), "{}").unwrap();
+
+        assert_eq!(
+            initialization_roots(vec![project.clone(), dictionaries], None),
+            vec![project]
+        );
+    }
 
     #[test]
     fn workspace_status_reports_metrics_when_unused_diagnostics_are_disabled() {
@@ -1467,9 +1819,8 @@ mod tests {
             r#"{
               "dictionaries":"../translations/translation.{locale}.json",
               "defaultLocale":"en",
-              "scopedFunctions":["useScopedTranslation"],
-              "translationMethods":["t"],
-              "fullKeyFunctions":["i18next.t"]
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "fullKeyFunctions":[{"functionName":"translate"}]
             }"#,
         )
         .unwrap();
@@ -1489,6 +1840,10 @@ mod tests {
         assert_eq!(status.total_key_count, 2);
         assert_eq!(status.unused_key_count, 1);
         assert_eq!(status.default_locale, "en");
+        assert_eq!(
+            status.dictionary_root_path,
+            dictionaries.display().to_string()
+        );
         assert_eq!(
             status.default_dictionary_path,
             Some(default_dictionary.display().to_string())
@@ -1531,9 +1886,8 @@ mod tests {
               "dictionaries":"translation.{locale}.json",
               "defaultLocale":"en",
               "keySeparator":".",
-              "scopedFunctions":["useScopedTranslation"],
-              "translationMethods":["t"],
-              "fullKeyFunctions":["i18next.t"]
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "fullKeyFunctions":[{"functionName":"translate"}]
             }"#,
         )
         .unwrap();
@@ -1605,9 +1959,8 @@ mod tests {
               "dictionaries":"translation.{locale}.json",
               "defaultLocale":"en",
               "keySeparator":".",
-              "scopedFunctions":["useScopedTranslation"],
-              "translationMethods":["t"],
-              "fullKeyFunctions":["i18next.t"]
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "fullKeyFunctions":[{"functionName":"translate"}]
             }"#,
         )
         .unwrap();
@@ -1711,16 +2064,17 @@ mod tests {
         std::fs::write(
             temp.path().join("locale-breeze.json"),
             r#"{
-              "dictionaries":"translation.{locale}.json",
+              "dictionaries":"locales/{locale}/{namespace}.json",
               "defaultLocale":"en",
+              "defaultNamespace":"common",
               "keySeparator":"/",
-              "scopedFunctions":["useScopedTranslation"],
-              "translationMethods":["t"],
-              "fullKeyFunctions":["i18next.t"]
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "fullKeyFunctions":[{"functionName":"translate"}]
             }"#,
         )
         .unwrap();
-        let dictionary_path = temp.path().join("translation.en.json");
+        std::fs::create_dir_all(temp.path().join("locales/en")).unwrap();
+        let dictionary_path = temp.path().join("locales/en/common.json");
         std::fs::write(
             &dictionary_path,
             r#"{"Page":{"Login":{"submit":"Sign in"}}}"#,
@@ -1753,7 +2107,10 @@ mod tests {
                 work_done_progress_params: Default::default(),
             })
             .unwrap();
-        assert_eq!(result, Some(Value::String("Page/Login/submit".into())));
+        assert_eq!(
+            result,
+            Some(Value::String("common:Page/Login/submit".into()))
+        );
     }
 
     #[test]
@@ -1765,9 +2122,8 @@ mod tests {
             r#"{
               "dictionaries":"translation.{locale}.json",
               "defaultLocale":"en",
-              "scopedFunctions":["useScopedTranslation"],
-              "translationMethods":["t"],
-              "fullKeyFunctions":["i18next.t"]
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "fullKeyFunctions":[{"functionName":"translate"}]
             }"#,
         )
         .unwrap();
@@ -1797,9 +2153,8 @@ mod tests {
             r#"{
               "dictionaries":"translation.{locale}.json",
               "defaultLocale":"en",
-              "scopedFunctions":["useScopedTranslation"],
-              "translationMethods":["t"],
-              "fullKeyFunctions":["i18next.t"]
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "fullKeyFunctions":[{"functionName":"translate"}]
             }"#,
         )
         .unwrap();
@@ -1816,7 +2171,7 @@ mod tests {
         .unwrap();
         let snapshot = workspace.snapshot();
         let key = CanonicalKey::new("Page.Card.title", ".").unwrap();
-        let edit = prepare_insertion(&snapshot, &key, "en", ".", "Hello").unwrap();
+        let edit = prepare_insertion(&snapshot, None, &key, "en", ".", "Hello").unwrap();
         assert_eq!(edit.uri, Url::from_file_path(dictionary_path).unwrap());
         assert_eq!(
             edit.new_text,
@@ -1832,9 +2187,8 @@ mod tests {
             r#"{
               "dictionaries":"translation.{locale}.json",
               "defaultLocale":"en",
-              "scopedFunctions":["useScopedTranslation"],
-              "translationMethods":["t"],
-              "fullKeyFunctions":["i18next.t"]
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "fullKeyFunctions":[{"functionName":"translate"}]
             }"#,
         )
         .unwrap();
@@ -1849,7 +2203,7 @@ mod tests {
         )
         .unwrap();
         let key = CanonicalKey::new("Page.title", ".").unwrap();
-        assert!(prepare_insertion(&workspace.snapshot(), &key, "en", ".", "Title").is_none());
+        assert!(prepare_insertion(&workspace.snapshot(), None, &key, "en", ".", "Title").is_none());
     }
 
     #[test]
@@ -1860,9 +2214,8 @@ mod tests {
             r#"{
               "dictionaries":"translation.{locale}.json",
               "defaultLocale":"en",
-              "scopedFunctions":["useScopedTranslation"],
-              "translationMethods":["t"],
-              "fullKeyFunctions":["i18next.t"]
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "fullKeyFunctions":[{"functionName":"translate"}]
             }"#,
         )
         .unwrap();
@@ -1883,7 +2236,7 @@ mod tests {
         let uri = Url::from_file_path(source_path).unwrap();
         let character = source.find("FieldNames").unwrap() as u32 + 2;
         let resolved = key_at_position(&snapshot, &uri, Position::new(0, character), ".").unwrap();
-        assert_eq!(resolved.as_str(), "Page.Steps.FieldNames");
+        assert_eq!(resolved.key.as_str(), "Page.Steps.FieldNames");
     }
 
     #[test]
@@ -1894,9 +2247,8 @@ mod tests {
             r#"{
               "dictionaries":"translation.{locale}.json",
               "defaultLocale":"en",
-              "scopedFunctions":["useScopedTranslation"],
-              "translationMethods":["t"],
-              "fullKeyFunctions":["i18next.t"],
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "fullKeyFunctions":[{"functionName":"translate"}],
               "ignoredScopes":["Server_Errors"]
             }"#,
         )

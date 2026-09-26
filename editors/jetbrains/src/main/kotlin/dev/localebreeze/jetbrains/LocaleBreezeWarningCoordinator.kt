@@ -33,6 +33,7 @@ data class LocaleBreezeWorkspaceStatus(
     val configPath: String = "",
     val defaultLocale: String = "",
     val defaultDictionaryPath: String? = null,
+    val dictionaryRootPath: String = "",
     val dictionaryFileCount: Int = 0,
     val totalKeyCount: Int = 0,
     val unusedKeyCount: Int = 0,
@@ -122,6 +123,7 @@ class LocaleBreezeWarningCoordinator(private val project: Project) {
     @Synchronized
     fun status(status: LocaleBreezeWorkspaceStatus) {
         if (workspaceStatus?.generation?.let { status.generation < it } == true) return
+        issues.entries.removeIf { it.value.code.startsWith("config_") }
         workspaceStatus = status
         lifecycle = LocaleBreezeLifecycle.READY
         changed()

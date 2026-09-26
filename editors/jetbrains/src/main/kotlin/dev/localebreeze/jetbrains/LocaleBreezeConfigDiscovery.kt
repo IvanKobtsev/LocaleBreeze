@@ -73,6 +73,15 @@ class LocaleBreezeConfigDiscovery(private val project: Project) {
             return
         }
 
+        val rememberedConfig = resolveSavedPath(settings.state.configPath)
+        if (settings.configLocation() == LocaleBreezeSettings.ConfigLocation.WORKSPACE_ROOT &&
+            rememberedConfig != null && Files.isRegularFile(rememberedConfig)
+        ) {
+            settings.state.configLocation = LocaleBreezeSettings.ConfigLocation.CUSTOM_PATH.name
+            activate(LocaleBreezeConfigSetupState.Configured(rememberedConfig.toString()), restartConfigured)
+            return
+        }
+
         deactivate(LocaleBreezeConfigSetupState.Searching)
         ReadAction.nonBlocking<List<Path>> {
             FilenameIndex.getVirtualFilesByName(
@@ -233,12 +242,16 @@ class LocaleBreezeConfigDiscovery(private val project: Project) {
         const val CONFIG_FILE_NAME = "locale-breeze.json"
         private val STARTER_CONFIG = """{
   "${'$'}schema": "https://raw.githubusercontent.com/IvanKobtsev/LocaleBreeze/main/schemas/config-v1.schema.json",
-  "dictionaries": "public/dictionaries/translation.{locale}.json",
+  "dictionaries": "public/dictionaries/{locale}/{namespace}.json",
   "defaultLocale": "en",
+  "defaultNamespace": "translation",
   "keySeparator": ".",
-  "scopedFunctions": ["useScopedTranslation"],
-  "translationMethods": ["t"],
-  "fullKeyFunctions": ["i18next.t"],
+  "scopedFunctions": [
+    { "functionName": "useScopedTranslation", "translationMethods": ["t"] }
+  ],
+  "fullKeyFunctions": [
+    { "functionName": "translate" }
+  ],
   "translationKeyTypes": ["TranslationKey"],
   "translationKeyProps": ["transKey"],
   "ignoredScopes": ["Server_Errors"]

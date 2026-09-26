@@ -26,9 +26,9 @@ LocaleBreeze is currently an MVP focused on literal i18next translation flows. I
 
 - Only literal scopes and keys are resolved.
 - Bindings are followed inside their lexical block; passed, returned, imported, or reassigned translators are not followed.
-- One dictionary pattern and logical translation module are supported per workspace.
+- One dictionary pattern is supported per workspace; it may match multiple locales and namespaces.
 - Only string-valued JSON leaves are indexed; arrays and non-string leaves are ignored.
-- Missing-key diagnostics, rename, CodeLens, namespaces, and cross-file data flow are not available yet.
+- Missing-key diagnostics, rename, CodeLens, namespace arrays, and cross-file data flow are not available yet.
 - The JetBrains integration currently targets the 2026.2 IDE line.
 
 ## Supported usage
@@ -43,11 +43,39 @@ const { t } = useScopedTranslation('Page.Login');
 t('submit');
 
 i18next.t('Page.Login.submit');
+
+const { t: commonT } = useTranslation('common', { keyPrefix: 'Page.Login' });
+commonT('submit');
+
+useTranslation(); // Uses defaultNamespace.
+i18next.t('common:Page.Login.submit');
+i18next.t('Page.Login.submit', { ns: 'common' });
 ```
 
 ## Configuration
 
-Copy `locale-breeze.example.json` to `locale-breeze.json` at the workspace root and adjust the dictionary pattern. The pattern is relative to the workspace root, must contain exactly one `{locale}` token, and cannot be absolute. Parent-directory (`..`) segments are supported when dictionaries live above the workspace; that external dictionary directory is indexed and watched alongside the workspace. The configured default locale must have a matching file.
+Copy `locale-breeze.example.json` to `locale-breeze.json` at the workspace root and adjust the dictionary pattern. The pattern is relative to the workspace root, must contain exactly one `{locale}` token, may contain one `{namespace}` token, and cannot be absolute. For example, `public/dictionaries/{locale}/{namespace}.json` matches `public/dictionaries/en/common.json`. Parent-directory (`..`) segments are supported when dictionaries live above the workspace; that external dictionary directory is indexed and watched alongside the workspace. Set `defaultNamespace` when the pattern discovers multiple namespaces; LocaleBreeze infers it when exactly one namespace exists. The configured default locale and namespace must have a matching file.
+
+LocaleBreeze automatically recognizes literal calls to `useTranslation` from `react-i18next` and `i18next.t` from `i18next`. Namespace arrays, computed namespaces and computed `keyPrefix` values are intentionally not resolved.
+
+Custom functions are configured independently. Scoped functions declare the methods returned by that function, while both scoped and full-key functions may override the global namespace:
+
+```json
+{
+  "scopedFunctions": [
+    {
+      "functionName": "useScopedTranslation",
+      "defaultNamespace": "common",
+      "translationMethods": ["t", "key"]
+    }
+  ],
+  "fullKeyFunctions": [
+    { "functionName": "translate", "defaultNamespace": "common" }
+  ]
+}
+```
+
+Namespace resolution prefers an explicit namespace in source, then the matched function's `defaultNamespace`, then the global `defaultNamespace`. The old string arrays and top-level `translationMethods` setting are no longer accepted.
 
 Unused-key hints are a user preference rather than workspace configuration. They are enabled by default and can be switched off with **Show unused keys** in the JetBrains or VS Code LocaleBreeze settings. Static-prefix templates such as ``i18next.t(`SomeScope.${value}`)`` mark every child of `SomeScope` as dynamically used; other unsupported dynamic references are not counted as uses.
 

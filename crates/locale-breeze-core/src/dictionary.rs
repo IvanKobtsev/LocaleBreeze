@@ -13,6 +13,7 @@ pub struct DictionaryEntry {
     pub uri: Url,
     pub key: CanonicalKey,
     pub locale: String,
+    pub namespace: Option<String>,
     pub value: Option<String>,
     pub key_range: ByteRange,
     pub value_range: ByteRange,
@@ -33,12 +34,23 @@ pub fn parse_dictionary(
     text: &str,
     separator: &str,
 ) -> Result<Vec<DictionaryEntry>, DictionaryError> {
-    parse_dictionary_ignoring(uri, locale, text, separator, &|_| false)
+    parse_dictionary_in_namespace(uri, locale, None, text, separator, &|_| false)
 }
 
 pub fn parse_dictionary_ignoring(
     uri: &Url,
     locale: &str,
+    text: &str,
+    separator: &str,
+    is_ignored: &dyn Fn(&CanonicalKey) -> bool,
+) -> Result<Vec<DictionaryEntry>, DictionaryError> {
+    parse_dictionary_in_namespace(uri, locale, None, text, separator, is_ignored)
+}
+
+pub fn parse_dictionary_in_namespace(
+    uri: &Url,
+    locale: &str,
+    namespace: Option<&str>,
     text: &str,
     separator: &str,
     is_ignored: &dyn Fn(&CanonicalKey) -> bool,
@@ -55,6 +67,7 @@ pub fn parse_dictionary_ignoring(
     visit_value(
         uri,
         locale,
+        namespace,
         text,
         separator,
         value,
@@ -69,6 +82,7 @@ pub fn parse_dictionary_ignoring(
 fn visit_value(
     uri: &Url,
     locale: &str,
+    namespace: Option<&str>,
     text: &str,
     separator: &str,
     node: Node<'_>,
@@ -122,6 +136,7 @@ fn visit_value(
                     uri: uri.clone(),
                     key,
                     locale: locale.to_owned(),
+                    namespace: namespace.map(str::to_owned),
                     value,
                     key_range,
                     value_range: ByteRange(value_node.byte_range()),
@@ -130,7 +145,7 @@ fn visit_value(
             }
         }
         visit_value(
-            uri, locale, text, separator, value_node, path, out, is_ignored,
+            uri, locale, namespace, text, separator, value_node, path, out, is_ignored,
         );
         path.pop();
     }

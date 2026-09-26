@@ -4,15 +4,21 @@
   "title": "LocaleBreeze configuration",
   "type": "object",
   "additionalProperties": false,
-  "required": ["dictionaries", "defaultLocale", "scopedFunctions", "translationMethods", "fullKeyFunctions"],
+  "required": ["dictionaries", "defaultLocale", "scopedFunctions", "fullKeyFunctions"],
   "properties": {
     "$schema": { "type": "string" },
-    "dictionaries": { "type": "string", "description": "Pattern relative to the workspace root containing exactly one {locale} token. Absolute paths are not allowed; parent-directory (..) segments may reference dictionaries outside the workspace." },
+    "dictionaries": { "type": "string", "description": "Pattern relative to the workspace root containing exactly one {locale} token and optionally one {namespace} token. Absolute paths are not allowed; parent-directory (..) segments may reference dictionaries outside the workspace." },
     "defaultLocale": { "type": "string", "minLength": 1 },
+    "defaultNamespace": { "type": "string", "minLength": 1, "description": "Default i18next namespace. Required when {namespace} matches more than one namespace; inferred when exactly one is found." },
     "keySeparator": { "type": "string", "minLength": 1, "default": "." },
-    "scopedFunctions": { "$ref": "#/$defs/conventions" },
-    "translationMethods": { "$ref": "#/$defs/conventions" },
-    "fullKeyFunctions": { "$ref": "#/$defs/conventions" },
+    "scopedFunctions": {
+      "type": "array", "minItems": 1,
+      "items": { "$ref": "#/$defs/scopedFunction" }
+    },
+    "fullKeyFunctions": {
+      "type": "array", "minItems": 1,
+      "items": { "$ref": "#/$defs/fullKeyFunction" }
+    },
     "translationKeyTypes": { "$ref": "#/$defs/optionalConventions" },
     "translationKeyProps": { "$ref": "#/$defs/optionalConventions" },
     "ignoredScopes": {
@@ -23,6 +29,24 @@
     }
   },
   "$defs": {
+    "functionName": { "type": "string", "pattern": "^[^\\s.]+(?:\\.[^\\s.]+)*$" },
+    "scopedFunction": {
+      "type": "object", "additionalProperties": false,
+      "required": ["functionName", "translationMethods"],
+      "properties": {
+        "functionName": { "$ref": "#/$defs/functionName" },
+        "defaultNamespace": { "type": "string", "minLength": 1 },
+        "translationMethods": { "$ref": "#/$defs/conventions" }
+      }
+    },
+    "fullKeyFunction": {
+      "type": "object", "additionalProperties": false,
+      "required": ["functionName"],
+      "properties": {
+        "functionName": { "$ref": "#/$defs/functionName" },
+        "defaultNamespace": { "type": "string", "minLength": 1 }
+      }
+    },
     "conventions": {
       "type": "array", "minItems": 1, "uniqueItems": true,
       "items": { "type": "string", "pattern": "^[^\\s.]+(?:\\.[^\\s.]+)*$" }
