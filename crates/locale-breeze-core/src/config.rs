@@ -31,7 +31,10 @@ pub struct ScopedFunctionConfig {
     pub function_name: String,
     #[serde(default)]
     pub default_namespace: Option<String>,
-    pub translation_methods: Vec<String>,
+    #[serde(default)]
+    pub translation_method: Option<String>,
+    #[serde(default)]
+    pub key_method: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
@@ -76,6 +79,10 @@ pub enum ConfigError {
     },
     #[error("duplicate function name {name:?} in {field}")]
     DuplicateFunction { field: &'static str, name: String },
+    #[error(
+        "scoped function {function:?} cannot use {method:?} as both translationMethod and keyMethod"
+    )]
+    DuplicateScopedMethod { function: String, method: String },
     #[error("dictionary {path} is invalid: {message}")]
     InvalidDictionary {
         path: PathBuf,
@@ -128,11 +135,19 @@ impl Config {
                     name: function.function_name.clone(),
                 });
             }
-            if function.translation_methods.is_empty() {
-                return Err(ConfigError::Empty("scopedFunctions.translationMethods"));
+            if let Some(method) = &function.translation_method {
+                validate_convention(method, "scopedFunctions.translationMethod")?;
             }
-            for method in &function.translation_methods {
-                validate_convention(method, "scopedFunctions.translationMethods")?;
+            if let Some(method) = &function.key_method {
+                validate_convention(method, "scopedFunctions.keyMethod")?;
+            }
+            if function.translation_method.is_some()
+                && function.translation_method == function.key_method
+            {
+                return Err(ConfigError::DuplicateScopedMethod {
+                    function: function.function_name.clone(),
+                    method: function.translation_method.clone().unwrap_or_default(),
+                });
             }
             validate_optional_namespace(
                 function.default_namespace.as_deref(),
@@ -396,7 +411,7 @@ mod tests {
             "dictionaries": "translation.{locale}.json",
             "defaultLocale": "en",
             "keySeparator": separator,
-            "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+            "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod": "t"}],
               "fullKeyFunctions":[{"functionName":"translate"}],
             "ignoredScopes": ignored_scopes
         }))
@@ -424,7 +439,7 @@ mod tests {
         let config: Config = serde_json::from_value(serde_json::json!({
             "dictionaries": "translation.{locale}.json",
             "defaultLocale": "en",
-            "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+            "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod": "t"}],
               "fullKeyFunctions":[{"functionName":"translate"}]
         }))
         .unwrap();
@@ -436,7 +451,7 @@ mod tests {
         let result = serde_json::from_value::<Config>(serde_json::json!({
             "dictionaries": "translation.{locale}.json",
             "defaultLocale": "en",
-            "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+            "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod": "t"}],
               "fullKeyFunctions":[{"functionName":"translate"}],
             "unusedKeys": true
         }));
@@ -462,8 +477,8 @@ mod tests {
             "defaultLocale": "en",
             "defaultNamespace": "common",
             "scopedFunctions": [
-                {"functionName":"useA","translationMethods":["t"]},
-                {"functionName":"useA","defaultNamespace":"home","translationMethods":["key"]}
+                {"functionName":"useA","translationMethod":"t"},
+                {"functionName":"useA","defaultNamespace":"home","keyMethod":"key"}
             ],
             "fullKeyFunctions": [{"functionName":"translate","defaultNamespace":"home"}]
         }))
@@ -475,18 +490,67 @@ mod tests {
     }
 
     #[test]
-    fn rejects_empty_scoped_translation_methods() {
+    fn validates_optional_scoped_methods() {
+        for scoped_function in [
+            serde_json::json!({"functionName":"useNone"}),
+            serde_json::json!({"functionName":"useTranslation","translationMethod":"t"}),
+            serde_json::json!({"functionName":"useKey","keyMethod":"key"}),
+            serde_json::json!({"functionName":"useBoth","translationMethod":"t","keyMethod":"key"}),
+        ] {
+            let config: Config = serde_json::from_value(serde_json::json!({
+                "dictionaries": "translation.{locale}.json",
+                "defaultLocale": "en",
+                "scopedFunctions": [scoped_function],
+                "fullKeyFunctions": [{"functionName":"translate"}]
+            }))
+            .unwrap();
+            config.validate().unwrap();
+        }
+    }
+
+    #[test]
+    fn rejects_empty_and_duplicate_scoped_methods() {
+        for (field, expected) in [
+            ("translationMethod", "scopedFunctions.translationMethod"),
+            ("keyMethod", "scopedFunctions.keyMethod"),
+        ] {
+            let mut scoped_function = serde_json::Map::from_iter([(
+                "functionName".into(),
+                serde_json::Value::String("useScopedTranslation".into()),
+            )]);
+            scoped_function.insert(field.into(), serde_json::Value::String(String::new()));
+            let config: Config = serde_json::from_value(serde_json::json!({
+                "dictionaries": "translation.{locale}.json",
+                "defaultLocale": "en",
+                "scopedFunctions": [scoped_function],
+                "fullKeyFunctions": [{"functionName":"translate"}]
+            }))
+            .unwrap();
+            assert!(
+                matches!(config.validate(), Err(ConfigError::Empty(value)) if value == expected)
+            );
+        }
+
         let config: Config = serde_json::from_value(serde_json::json!({
             "dictionaries": "translation.{locale}.json",
             "defaultLocale": "en",
-            "scopedFunctions": [{"functionName":"useScopedTranslation","translationMethods":[]}],
+            "scopedFunctions": [{"functionName":"useScopedTranslation","translationMethod":"t","keyMethod":"t"}],
             "fullKeyFunctions": [{"functionName":"translate"}]
         }))
         .unwrap();
         assert!(matches!(
             config.validate(),
-            Err(ConfigError::Empty("scopedFunctions.translationMethods"))
+            Err(ConfigError::DuplicateScopedMethod { function, method })
+                if function == "useScopedTranslation" && method == "t"
         ));
+
+        let legacy = serde_json::from_value::<Config>(serde_json::json!({
+            "dictionaries": "translation.{locale}.json",
+            "defaultLocale": "en",
+            "scopedFunctions": [{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+            "fullKeyFunctions": [{"functionName":"translate"}]
+        }));
+        assert!(legacy.is_err());
     }
 
     #[test]

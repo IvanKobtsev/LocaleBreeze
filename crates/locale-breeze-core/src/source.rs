@@ -45,6 +45,7 @@ impl TranslationArguments {
 pub struct ScopeBinding {
     pub name: String,
     pub method: String,
+    pub is_translation_method: bool,
     pub scope: Option<CanonicalKey>,
     pub namespace: Option<String>,
     pub declaration_range: ByteRange,
@@ -65,10 +66,25 @@ pub fn analyze_source(
 ) -> (Vec<SourceOccurrence>, Vec<ScopeBinding>) {
     let scoped_functions = scoped_functions
         .iter()
-        .map(|function_name| ScopedFunctionConfig {
-            function_name: function_name.clone(),
-            default_namespace: None,
-            translation_methods: methods.to_vec(),
+        .flat_map(|function_name| {
+            if methods.is_empty() {
+                vec![ScopedFunctionConfig {
+                    function_name: function_name.clone(),
+                    default_namespace: None,
+                    translation_method: None,
+                    key_method: None,
+                }]
+            } else {
+                methods
+                    .iter()
+                    .map(|method| ScopedFunctionConfig {
+                        function_name: function_name.clone(),
+                        default_namespace: None,
+                        translation_method: Some(method.clone()),
+                        key_method: None,
+                    })
+                    .collect()
+            }
         })
         .collect::<Vec<_>>();
     let full_key_functions = full_key_functions
@@ -162,10 +178,11 @@ fn collect_bindings(
             node.child_by_field_name("value"),
         ) {
             if let Some((callee, literal)) = call_with_literal(value, text) {
-                if let Some(function) = scoped_functions
+                let matching_functions = scoped_functions
                     .iter()
-                    .find(|function| function.function_name == callee)
-                {
+                    .filter(|function| function.function_name == callee)
+                    .collect::<Vec<_>>();
+                if let Some(function) = matching_functions.first() {
                     if let Some(scope) =
                         literal_value(literal, text).and_then(|s| CanonicalKey::new(s, separator))
                     {
@@ -174,10 +191,14 @@ fn collect_bindings(
                         let declaration_range = content_range(literal);
                         if name.kind() == "identifier" {
                             if let Ok(binding_name) = name.utf8_text(text.as_bytes()) {
-                                for method in &function.translation_methods {
+                                for (method, is_translation_method) in matching_functions
+                                    .iter()
+                                    .flat_map(|function| configured_scoped_methods(function))
+                                {
                                     out.push(ScopeBinding {
                                         name: binding_name.into(),
-                                        method: method.clone(),
+                                        method: method.into(),
+                                        is_translation_method,
                                         scope: Some(scope.clone()),
                                         namespace: function
                                             .default_namespace
@@ -211,14 +232,15 @@ fn collect_bindings(
                                     }
                                     _ => continue,
                                 };
-                                if function
-                                    .translation_methods
+                                if let Some((_, is_translation_method)) = matching_functions
                                     .iter()
-                                    .any(|method| method == property)
+                                    .flat_map(|function| configured_scoped_methods(function))
+                                    .find(|(method, _)| *method == property)
                                 {
                                     out.push(ScopeBinding {
                                         name: local.into(),
                                         method: property.into(),
+                                        is_translation_method,
                                         scope: Some(scope.clone()),
                                         namespace: function
                                             .default_namespace
@@ -412,7 +434,9 @@ fn collect_calls(
                             kind: OccurrenceKind::ScopedKey,
                             scope: binding.scope.clone(),
                             relative_key: Some(relative.to_owned()),
-                            arguments: Some(translation_arguments(node, text)),
+                            arguments: binding
+                                .is_translation_method
+                                .then(|| translation_arguments(node, text)),
                         });
                     }
                 }
@@ -509,6 +533,7 @@ fn push_bindings(
                 out.push(ScopeBinding {
                     name: binding_name.into(),
                     method: method.clone(),
+                    is_translation_method: true,
                     scope: scope.clone(),
                     namespace: Some(namespace.clone()),
                     declaration_range: declaration_range.clone(),
@@ -542,6 +567,7 @@ fn push_bindings(
                 out.push(ScopeBinding {
                     name: local.into(),
                     method: property.into(),
+                    is_translation_method: true,
                     scope: scope.clone(),
                     namespace: Some(namespace.clone()),
                     declaration_range: declaration_range.clone(),
@@ -551,6 +577,17 @@ fn push_bindings(
             }
         }
     }
+}
+
+fn configured_scoped_methods(
+    function: &ScopedFunctionConfig,
+) -> impl Iterator<Item = (&str, bool)> {
+    function
+        .translation_method
+        .as_deref()
+        .map(|method| (method, true))
+        .into_iter()
+        .chain(function.key_method.as_deref().map(|method| (method, false)))
 }
 
 fn is_call_named(node: Node<'_>, text: &str, expected: &str) -> bool {
@@ -966,10 +1003,12 @@ mod tests {
         let uri = Url::parse("file:///app.tsx").unwrap();
         let text = r#"
           const a = useAlpha('Page');
-          a.t('title');
-          a.key('ignored');
-          const { key } = useBeta('Card');
-          key('label');
+          a.t('title', { name });
+          a.key('lookup', { count: 2, extra: true });
+          const { key: getKey } = useBeta('Card');
+          getKey('label', { count: 2 });
+          const none = useNone('Empty');
+          none.t('ignored');
           translate('plain');
           translate('explicit:value');
         "#;
@@ -977,12 +1016,20 @@ mod tests {
             ScopedFunctionConfig {
                 function_name: "useAlpha".into(),
                 default_namespace: Some("alpha".into()),
-                translation_methods: vec!["t".into()],
+                translation_method: Some("t".into()),
+                key_method: Some("key".into()),
             },
             ScopedFunctionConfig {
                 function_name: "useBeta".into(),
                 default_namespace: None,
-                translation_methods: vec!["key".into()],
+                translation_method: None,
+                key_method: Some("key".into()),
+            },
+            ScopedFunctionConfig {
+                function_name: "useNone".into(),
+                default_namespace: None,
+                translation_method: None,
+                key_method: None,
             },
         ];
         let full = vec![FullKeyFunctionConfig {
@@ -1003,21 +1050,50 @@ mod tests {
         assert!(bindings.iter().any(|binding| {
             binding.name == "a"
                 && binding.method == "t"
+                && binding.is_translation_method
                 && binding.namespace.as_deref() == Some("alpha")
         }));
-        assert!(
-            !bindings
-                .iter()
-                .any(|binding| binding.name == "a" && binding.method == "key")
-        );
+        assert!(!bindings.iter().any(|binding| binding.name == "none"));
+        assert!(bindings.iter().any(|binding| {
+            binding.name == "a"
+                && binding.method == "key"
+                && !binding.is_translation_method
+                && binding.namespace.as_deref() == Some("alpha")
+        }));
+        assert!(bindings.iter().any(|binding| {
+            binding.name == "getKey"
+                && binding.method == "key"
+                && !binding.is_translation_method
+                && binding.namespace.as_deref() == Some("global")
+        }));
         assert!(found.iter().any(|occurrence| {
             occurrence.namespace.as_deref() == Some("alpha")
                 && occurrence.key.as_str() == "Page.title"
+                && occurrence
+                    .arguments
+                    .as_ref()
+                    .is_some_and(|arguments| arguments.has("name"))
+        }));
+        assert!(found.iter().any(|occurrence| {
+            occurrence.namespace.as_deref() == Some("alpha")
+                && occurrence.key.as_str() == "Page.lookup"
+                && occurrence.arguments.is_none()
         }));
         assert!(found.iter().any(|occurrence| {
             occurrence.namespace.as_deref() == Some("global")
                 && occurrence.key.as_str() == "Card.label"
+                && occurrence.arguments.is_none()
         }));
+        assert!(found.iter().any(|occurrence| {
+            occurrence.kind == OccurrenceKind::ScopeDeclaration
+                && occurrence.namespace.as_deref() == Some("global")
+                && occurrence.key.as_str() == "Empty"
+        }));
+        assert!(
+            !found
+                .iter()
+                .any(|occurrence| occurrence.key.as_str() == "Empty.ignored")
+        );
         assert!(found.iter().any(|occurrence| {
             occurrence.namespace.as_deref() == Some("full") && occurrence.key.as_str() == "plain"
         }));

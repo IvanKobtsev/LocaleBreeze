@@ -98,6 +98,7 @@ private class LocaleBreezeToolWindowPanel(
     private val normalToolIcon = IconLoader.getIcon("/icons/tool_window_icon/default/localeBreeze.svg", javaClass)
     private val fadedToolIcon = IconLoader.getIcon("/icons/tool_window_icon/disabled/localeBreeze.svg", javaClass)
     private val openDictionaryIcon = IconLoader.getIcon("/icons/open_translation_dictionary/localeBreeze.svg", javaClass)
+    private val openProjectHealthReportIcon = IconLoader.getIcon("/icons/project_health_report/localeBreeze.svg", javaClass)
     private val configFileIcon = IconLoader.getIcon("/icons/config_file/localeBreeze.svg", javaClass)
     private val settingsIcon = IconLoader.getIcon("/icons/settings_icon/localeBreeze.svg", javaClass)
     private val powerIcon = IconLoader.getIcon("/icons/power_icon/localeBreeze.svg", javaClass)
@@ -545,6 +546,7 @@ private class LocaleBreezeToolWindowPanel(
             "Open dictionary",
             dictionaries.isNotEmpty(),
         )
+        val openProjectHealthReportButton = iconButton(openProjectHealthReportIcon, "Open project health report", dictionaries.isNotEmpty())
         openDictionaryButton.addActionListener {
             openDictionary(dictionaries, openDictionaryButton)
         }
@@ -553,6 +555,7 @@ private class LocaleBreezeToolWindowPanel(
             iconButton(configFileIcon, "Open workspace config", configPath != null) {
                 configPath?.let(::openPath)
             },
+            openProjectHealthReportButton
         ), BorderLayout.WEST)
         add(toolBarRow(
             iconButton(settingsIcon, "Open LocaleBreeze settings") {

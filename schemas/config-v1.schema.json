@@ -32,11 +32,12 @@
     "functionName": { "type": "string", "pattern": "^[^\\s.]+(?:\\.[^\\s.]+)*$" },
     "scopedFunction": {
       "type": "object", "additionalProperties": false,
-      "required": ["functionName", "translationMethods"],
+      "required": ["functionName"],
       "properties": {
         "functionName": { "$ref": "#/$defs/functionName" },
         "defaultNamespace": { "type": "string", "minLength": 1 },
-        "translationMethods": { "$ref": "#/$defs/conventions" }
+        "translationMethod": { "$ref": "#/$defs/functionName" },
+        "keyMethod": { "$ref": "#/$defs/functionName" }
       }
     },
     "fullKeyFunction": {

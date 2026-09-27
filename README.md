@@ -58,7 +58,7 @@ Copy `locale-breeze.example.json` to `locale-breeze.json` at the workspace root 
 
 LocaleBreeze automatically recognizes literal calls to `useTranslation` from `react-i18next` and `i18next.t` from `i18next`. Namespace arrays, computed namespaces and computed `keyPrefix` values are intentionally not resolved.
 
-Custom functions are configured independently. Scoped functions declare the methods returned by that function, while both scoped and full-key functions may override the global namespace:
+Custom functions are configured independently. Scoped functions may declare one returned translation method and one returned key method, while both scoped and full-key functions may override the global namespace. Translation methods validate interpolation options; key methods only resolve and track keys:
 
 ```json
 {
@@ -66,7 +66,8 @@ Custom functions are configured independently. Scoped functions declare the meth
     {
       "functionName": "useScopedTranslation",
       "defaultNamespace": "common",
-      "translationMethods": ["t", "key"]
+      "translationMethod": "t",
+      "keyMethod": "key"
     }
   ],
   "fullKeyFunctions": [
@@ -75,7 +76,7 @@ Custom functions are configured independently. Scoped functions declare the meth
 }
 ```
 
-Namespace resolution prefers an explicit namespace in source, then the matched function's `defaultNamespace`, then the global `defaultNamespace`. The old string arrays and top-level `translationMethods` setting are no longer accepted.
+Namespace resolution prefers an explicit namespace in source, then the matched function's `defaultNamespace`, then the global `defaultNamespace`. Both scoped method fields are optional. The old string arrays, `translationMethods` arrays, and top-level `translationMethods` setting are no longer accepted.
 
 Unused-key hints are a user preference rather than workspace configuration. They are enabled by default and can be switched off with **Show unused keys** in the JetBrains or VS Code LocaleBreeze settings. Static-prefix templates such as ``i18next.t(`SomeScope.${value}`)`` mark every child of `SomeScope` as dynamically used; other unsupported dynamic references are not counted as uses.
 

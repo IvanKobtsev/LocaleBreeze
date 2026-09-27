@@ -19,14 +19,6 @@ fn plural_base(key: &CanonicalKey, separator: &str) -> Option<CanonicalKey> {
     })
 }
 
-fn occurrence_uses_exact_key(occurrence: &SourceOccurrence) -> bool {
-    occurrence.kind != OccurrenceKind::ScopeDeclaration
-        && !occurrence
-            .arguments
-            .as_ref()
-            .is_some_and(|arguments| arguments.has("count"))
-}
-
 #[derive(Clone, Debug)]
 pub enum CompletionContext {
     Scope {
@@ -139,11 +131,7 @@ impl IndexSnapshot {
         occurrence: &SourceOccurrence,
         separator: &str,
     ) -> Vec<&'a DictionaryEntry> {
-        if occurrence
-            .arguments
-            .as_ref()
-            .is_some_and(|arguments| arguments.has("count"))
-        {
+        if self.occurrence_resolves_to_plural_family(occurrence) {
             self.plural_dictionary_entries(
                 occurrence.namespace.as_deref(),
                 &occurrence.key,
@@ -154,6 +142,21 @@ impl IndexSnapshot {
                 .iter()
                 .collect()
         }
+    }
+
+    pub fn occurrence_resolves_to_plural_family(&self, occurrence: &SourceOccurrence) -> bool {
+        occurrence
+            .arguments
+            .as_ref()
+            .is_some_and(|arguments| arguments.has("count"))
+            && self
+                .dictionary_entries(occurrence.namespace.as_deref(), &occurrence.key)
+                .is_empty()
+    }
+
+    fn occurrence_uses_exact_key(&self, occurrence: &SourceOccurrence) -> bool {
+        occurrence.kind != OccurrenceKind::ScopeDeclaration
+            && !self.occurrence_resolves_to_plural_family(occurrence)
     }
 
     pub fn plural_dictionary_entries<'a>(
@@ -217,7 +220,7 @@ impl IndexSnapshot {
     pub fn is_leaf_key_used(&self, key: &CanonicalKey) -> bool {
         self.occurrences(None, key)
             .iter()
-            .any(occurrence_uses_exact_key)
+            .any(|occurrence| self.occurrence_uses_exact_key(occurrence))
             || self
                 .dynamic_scope_occurrences(None, key, ".")
                 .next()
@@ -227,7 +230,7 @@ impl IndexSnapshot {
     pub fn is_leaf_key_used_with_separator(&self, key: &CanonicalKey, separator: &str) -> bool {
         self.occurrences(None, key)
             .iter()
-            .any(occurrence_uses_exact_key)
+            .any(|occurrence| self.occurrence_uses_exact_key(occurrence))
             || self
                 .dynamic_scope_occurrences(None, key, separator)
                 .next()
@@ -237,16 +240,11 @@ impl IndexSnapshot {
     pub fn is_leaf_entry_used(&self, entry: &DictionaryEntry, separator: &str) -> bool {
         self.occurrences(entry.namespace.as_deref(), &entry.key)
             .iter()
-            .any(occurrence_uses_exact_key)
+            .any(|occurrence| self.occurrence_uses_exact_key(occurrence))
             || plural_base(&entry.key, separator).is_some_and(|base| {
                 self.occurrences(entry.namespace.as_deref(), &base)
                     .iter()
-                    .any(|occurrence| {
-                        occurrence
-                            .arguments
-                            .as_ref()
-                            .is_some_and(|arguments| arguments.has("count"))
-                    })
+                    .any(|occurrence| self.occurrence_resolves_to_plural_family(occurrence))
             })
             || self
                 .dynamic_scope_occurrences(entry.namespace.as_deref(), &entry.key, separator)
@@ -281,18 +279,13 @@ impl IndexSnapshot {
         let mut occurrences = self
             .occurrences(namespace, key)
             .iter()
-            .filter(|occurrence| occurrence_uses_exact_key(occurrence))
+            .filter(|occurrence| self.occurrence_uses_exact_key(occurrence))
             .collect::<Vec<_>>();
         if let Some(base) = plural_base(key, separator) {
             occurrences.extend(
                 self.occurrences(namespace, &base)
                     .iter()
-                    .filter(|occurrence| {
-                        occurrence
-                            .arguments
-                            .as_ref()
-                            .is_some_and(|arguments| arguments.has("count"))
-                    }),
+                    .filter(|occurrence| self.occurrence_resolves_to_plural_family(occurrence)),
             );
         }
         occurrences
@@ -1160,12 +1153,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(
             temp.path().join("locale-breeze.json"),
-            r#"{"dictionaries":"translation.{locale}.json","defaultLocale":"en","scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],"fullKeyFunctions":[{"functionName":"translate"}]}"#,
+            r#"{"dictionaries":"translation.{locale}.json","defaultLocale":"en","scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod":"t"}],"fullKeyFunctions":[{"functionName":"translate"}]}"#,
         )
         .unwrap();
         std::fs::write(
             temp.path().join("translation.en.json"),
-            r#"{"item":"Base","item_one":"One","item_many":"Many","item_custom":"Custom"}"#,
+            r#"{"item_one":"One","item_many":"Many","item_custom":"Custom"}"#,
         )
         .unwrap();
         let source_path = temp.path().join("app.ts");
@@ -1189,13 +1182,133 @@ mod tests {
                 &snapshot.dictionary_entries(None, &CanonicalKey::new(key, ".").unwrap())[0];
             assert!(snapshot.is_leaf_entry_used(entry, "."));
         }
-        for key in ["item", "item_custom"] {
+        let custom = CanonicalKey::new("item_custom", ".").unwrap();
+        let custom_entry = &snapshot.dictionary_entries(None, &custom)[0];
+        assert!(!snapshot.is_leaf_entry_used(custom_entry, "."));
+        let many = CanonicalKey::new("item_many", ".").unwrap();
+        assert_eq!(snapshot.occurrences_resolving_to(None, &many, ".").len(), 1);
+    }
+
+    #[test]
+    fn counted_calls_prefer_an_existing_exact_key() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("locale-breeze.json"),
+            r#"{"dictionaries":"translation.{locale}.json","defaultLocale":"en","scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod":"t"}],"fullKeyFunctions":[{"functionName":"translate"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("translation.en.json"),
+            r#"{"testRunsFound":"{{count}} test runs found","testRunsFound_one":"One run","testRunsFound_many":"Many runs"}"#,
+        )
+        .unwrap();
+        let source_path = temp.path().join("DocumentationSettings.tsx");
+        std::fs::write(
+            &source_path,
+            "i18next.t('testRunsFound', { count: testRuns.length })",
+        )
+        .unwrap();
+        let workspace = WorkspaceIndex::load(
+            temp.path().to_owned(),
+            &temp.path().join("locale-breeze.json"),
+        )
+        .unwrap();
+        let snapshot = workspace.snapshot();
+        let uri = Url::from_file_path(source_path).unwrap();
+        let occurrence = snapshot.source_occurrences(&uri).first().unwrap();
+
+        assert!(!snapshot.occurrence_resolves_to_plural_family(occurrence));
+        assert_eq!(
+            snapshot
+                .resolved_dictionary_entries(occurrence, ".")
+                .into_iter()
+                .map(|entry| entry.key.as_str())
+                .collect::<Vec<_>>(),
+            ["testRunsFound"]
+        );
+
+        let exact = CanonicalKey::new("testRunsFound", ".").unwrap();
+        let exact_entry = &snapshot.dictionary_entries(None, &exact)[0];
+        assert!(snapshot.is_leaf_entry_used(exact_entry, "."));
+        assert_eq!(
+            snapshot.occurrences_resolving_to(None, &exact, ".").len(),
+            1
+        );
+        for key in ["testRunsFound_one", "testRunsFound_many"] {
+            let entry =
+                &snapshot.dictionary_entries(None, &CanonicalKey::new(key, ".").unwrap())[0];
+            assert!(!snapshot.is_leaf_entry_used(entry, "."));
+            assert!(
+                snapshot
+                    .occurrences_resolving_to(None, &entry.key, ".")
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn scoped_key_methods_never_activate_plural_resolution() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("locale-breeze.json"),
+            r#"{"dictionaries":"translation.{locale}.json","defaultLocale":"en","scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod":"t","keyMethod":"key"}],"fullKeyFunctions":[{"functionName":"translate"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("translation.en.json"),
+            r#"{"Page":{"exact":"Value","item_one":"One","item_many":"Many"}}"#,
+        )
+        .unwrap();
+        let source_path = temp.path().join("app.ts");
+        std::fs::write(
+            &source_path,
+            concat!(
+                "const scoped = useScopedTranslation('Page');\n",
+                "scoped.key('exact', { count: 2, extra: true });\n",
+                "scoped.key('item', { count: 2 });"
+            ),
+        )
+        .unwrap();
+        let workspace = WorkspaceIndex::load(
+            temp.path().to_owned(),
+            &temp.path().join("locale-breeze.json"),
+        )
+        .unwrap();
+        let snapshot = workspace.snapshot();
+        let uri = Url::from_file_path(source_path).unwrap();
+        let occurrences = snapshot
+            .source_occurrences(&uri)
+            .iter()
+            .filter(|occurrence| occurrence.kind == OccurrenceKind::ScopedKey)
+            .collect::<Vec<_>>();
+
+        assert_eq!(occurrences.len(), 2);
+        assert!(
+            occurrences
+                .iter()
+                .all(|occurrence| occurrence.arguments.is_none())
+        );
+        assert_eq!(
+            snapshot
+                .resolved_dictionary_entries(occurrences[0], ".")
+                .len(),
+            1
+        );
+        assert!(
+            snapshot
+                .resolved_dictionary_entries(occurrences[1], ".")
+                .is_empty()
+        );
+        let exact = CanonicalKey::new("Page.exact", ".").unwrap();
+        assert_eq!(
+            snapshot.occurrences_resolving_to(None, &exact, ".").len(),
+            1
+        );
+        for key in ["Page.item_one", "Page.item_many"] {
             let entry =
                 &snapshot.dictionary_entries(None, &CanonicalKey::new(key, ".").unwrap())[0];
             assert!(!snapshot.is_leaf_entry_used(entry, "."));
         }
-        let many = CanonicalKey::new("item_many", ".").unwrap();
-        assert_eq!(snapshot.occurrences_resolving_to(None, &many, ".").len(), 1);
     }
 
     #[test]
@@ -1224,7 +1337,7 @@ mod tests {
             r#"{
               "dictionaries":"translation.{locale}.json",
               "defaultLocale":"en",
-              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod": "t"}],
               "fullKeyFunctions":[{"functionName":"translate"}],
               "ignoredScopes":["Server_Errors"]
             }"#,
@@ -1585,7 +1698,7 @@ mod tests {
             IndexSnapshot::rebuild(1, HashMap::from([(uri.clone(), Arc::new(contribution))]));
         let config: Config = serde_json::from_value(serde_json::json!({
             "dictionaries":"translation.{locale}.json", "defaultLocale":"en", "keySeparator":".",
-            "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+            "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod": "t"}],
               "fullKeyFunctions":[{"functionName":"translate"}]
         }))
         .unwrap();
@@ -1605,7 +1718,7 @@ mod tests {
               "dictionaries":"dict/translation.{locale}.json",
               "defaultLocale":"en",
               "keySeparator":".",
-              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod": "t"}],
               "fullKeyFunctions":[{"functionName":"translate"}]
             }"#,
         )
@@ -1638,7 +1751,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(
             temp.path().join("locale-breeze.json"),
-            r#"{"dictionaries":"translation.{locale}.json","defaultLocale":"en","scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+            r#"{"dictionaries":"translation.{locale}.json","defaultLocale":"en","scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod": "t"}],
               "fullKeyFunctions":[{"functionName":"translate"}]}"#,
         )
         .unwrap();
@@ -1663,7 +1776,7 @@ mod tests {
               "dictionaries":"translation.{locale}.json",
               "defaultLocale":"en",
               "keySeparator":".",
-              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod": "t"}],
               "fullKeyFunctions":[{"functionName":"translate"}]
             }"#,
         )
@@ -1697,7 +1810,7 @@ mod tests {
               "dictionaries":"translation.{locale}.json",
               "defaultLocale":"en",
               "keySeparator":".",
-              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod": "t"}],
               "fullKeyFunctions":[{"functionName":"translate"}]
             }"#,
         )
@@ -1738,7 +1851,7 @@ mod tests {
             r#"{
           "dictionaries":"locales/{locale}/{namespace}.json",
           "defaultLocale":"en", "defaultNamespace":"common",
-          "scopedFunctions":[{"functionName":"useScopedTranslation","defaultNamespace":"home","translationMethods":["t"]}],
+          "scopedFunctions":[{"functionName":"useScopedTranslation","defaultNamespace":"home","translationMethod": "t"}],
           "fullKeyFunctions":[{"functionName":"translate","defaultNamespace":"home"}]
         }"#,
         )
@@ -1846,7 +1959,7 @@ mod tests {
             r#"{
               "dictionaries":"locales/{locale}/{namespace}.json",
               "defaultLocale":"en",
-              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod": "t"}],
               "fullKeyFunctions":[{"functionName":"translate"}]
             }"#,
         )
@@ -1862,7 +1975,7 @@ mod tests {
               "dictionaries":"locales/{locale}/{namespace}.json",
               "defaultLocale":"en",
               "defaultNamespace":"common",
-              "scopedFunctions":[{"functionName":"useScopedTranslation","defaultNamespace":"missing","translationMethods":["t"]}],
+              "scopedFunctions":[{"functionName":"useScopedTranslation","defaultNamespace":"missing","translationMethod": "t"}],
               "fullKeyFunctions":[{"functionName":"translate"}]
             }"#,
         )

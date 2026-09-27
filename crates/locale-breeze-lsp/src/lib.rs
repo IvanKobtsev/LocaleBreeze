@@ -18,6 +18,7 @@ const RESOLVE_KEY_COMMAND: &str = "localeBreeze.resolveFullKey";
 const REFRESH_DOCUMENT_COMMAND: &str = "localeBreeze.refreshDocument";
 const DOCUMENT_KEYS_COMMAND: &str = "localeBreeze.documentKeys";
 const PREPARE_ADD_KEY_COMMAND: &str = "localeBreeze.prepareAddKey";
+const WORKSPACE_REPORT_COMMAND: &str = "localeBreeze.workspaceReport";
 
 pub fn run_stdio(config_override: Option<PathBuf>, show_unused_keys: bool) -> Result<()> {
     let (connection, io_threads) = Connection::stdio();
@@ -45,6 +46,7 @@ pub fn run_stdio(config_override: Option<PathBuf>, show_unused_keys: bool) -> Re
                 REFRESH_DOCUMENT_COMMAND.into(),
                 DOCUMENT_KEYS_COMMAND.into(),
                 PREPARE_ADD_KEY_COMMAND.into(),
+                WORKSPACE_REPORT_COMMAND.into(),
             ],
             ..Default::default()
         }),
@@ -107,6 +109,57 @@ struct PreparedEdit {
     version: Option<i32>,
     range: Range,
     new_text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceReportParams {
+    workspace_root: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceReportResult {
+    version: u8,
+    workspace_root: String,
+    generation: u64,
+    findings: Vec<WorkspaceReportFinding>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceReportFinding {
+    code: String,
+    message: String,
+    key: String,
+    uri: Url,
+    range: Range,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AnalysisFindingKind {
+    MissingTranslationKey,
+    MissingInterpolationValue,
+    ExtraInterpolationValue,
+}
+
+impl AnalysisFindingKind {
+    fn code(self) -> &'static str {
+        match self {
+            Self::MissingTranslationKey => "missing-translation-key",
+            Self::MissingInterpolationValue => "missing-interpolation-value",
+            Self::ExtraInterpolationValue => "extra-interpolation-value",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct AnalysisFinding {
+    kind: AnalysisFindingKind,
+    message: String,
+    key: String,
+    uri: Url,
+    range: ByteRange,
 }
 
 #[derive(Serialize)]
@@ -303,6 +356,12 @@ impl Server {
         self.workspaces
             .iter()
             .find(|workspace| workspace.contains_path(&path))
+    }
+
+    fn workspace_for_root(&self, root: &std::path::Path) -> Option<&Arc<WorkspaceIndex>> {
+        self.workspaces
+            .iter()
+            .find(|workspace| same_path(workspace.root(), root))
     }
 
     fn config_path_for(&self, root: &std::path::Path) -> PathBuf {
@@ -626,10 +685,7 @@ impl Server {
         let default_locale = &workspace.config().default_locale;
         let offset = position_offset(&snapshot, &uri, position).unwrap_or(usize::MAX);
         if let Some(occurrence) = snapshot.occurrence_at(&uri, offset)
-            && occurrence
-                .arguments
-                .as_ref()
-                .is_some_and(|arguments| arguments.has("count"))
+            && snapshot.occurrence_resolves_to_plural_family(occurrence)
         {
             let mut entries = snapshot
                 .resolved_dictionary_entries(occurrence, &workspace.config().key_separator)
@@ -741,12 +797,9 @@ impl Server {
             )
         } else {
             let occurrence = snapshot.occurrence_at(&uri, offset);
-            if occurrence.is_some_and(|occurrence| {
-                occurrence
-                    .arguments
-                    .as_ref()
-                    .is_some_and(|arguments| arguments.has("count"))
-            }) {
+            if occurrence
+                .is_some_and(|occurrence| snapshot.occurrence_resolves_to_plural_family(occurrence))
+            {
                 snapshot
                     .resolved_dictionary_entries(
                         occurrence.unwrap(),
@@ -903,6 +956,36 @@ impl Server {
                 Ok(Some(serde_json::to_value(DocumentKeysResult {
                     version: snapshot.version(&document.uri),
                     keys,
+                })?))
+            }
+            WORKSPACE_REPORT_COMMAND => {
+                let Some(argument) = params.arguments.first() else {
+                    return Ok(None);
+                };
+                let request: WorkspaceReportParams = serde_json::from_value(argument.clone())?;
+                let root = PathBuf::from(&request.workspace_root);
+                let Some(workspace) = self.workspace_for_root(&root) else {
+                    return Ok(None);
+                };
+                let snapshot = workspace.snapshot();
+                let findings = analysis_findings(workspace, &snapshot)
+                    .into_iter()
+                    .filter_map(|finding| {
+                        let range = location(&snapshot, &finding.uri, &finding.range)?.range;
+                        Some(WorkspaceReportFinding {
+                            code: finding.kind.code().into(),
+                            message: finding.message,
+                            key: finding.key,
+                            uri: finding.uri,
+                            range,
+                        })
+                    })
+                    .collect();
+                Ok(Some(serde_json::to_value(WorkspaceReportResult {
+                    version: 1,
+                    workspace_root: workspace.root().display().to_string(),
+                    generation: snapshot.generation,
+                    findings,
                 })?))
             }
             PREPARE_ADD_KEY_COMMAND => {
@@ -1282,33 +1365,51 @@ fn path_is_within(path: &std::path::Path, root: &std::path::Path) -> bool {
     })
 }
 
-fn diagnostic_notifications(
-    workspace: &WorkspaceIndex,
-    published: &Mutex<HashMap<Url, Vec<Diagnostic>>>,
-) -> Vec<Notification> {
-    let snapshot = workspace.snapshot();
-    let mut by_uri: HashMap<Url, Vec<Diagnostic>> = HashMap::new();
+fn analysis_findings(workspace: &WorkspaceIndex, snapshot: &IndexSnapshot) -> Vec<AnalysisFinding> {
+    let mut findings = Vec::new();
     for file in snapshot.files.values() {
         for occurrence in &file.occurrences {
+            if occurrence.range.0.is_empty()
+                || matches!(
+                    occurrence.kind,
+                    OccurrenceKind::DynamicScope | OccurrenceKind::NamespaceDeclaration
+                )
+            {
+                continue;
+            }
+            let key = occurrence.namespace.as_ref().map_or_else(
+                || occurrence.key.as_str().to_owned(),
+                |namespace| format!("{namespace}:{}", occurrence.key),
+            );
+            let entries = snapshot
+                .resolved_dictionary_entries(occurrence, &workspace.config().key_separator)
+                .into_iter()
+                .filter(|entry| entry.locale == workspace.config().default_locale)
+                .collect::<Vec<_>>();
+            if entries.is_empty() {
+                let subject = if occurrence.kind == OccurrenceKind::ScopeDeclaration {
+                    "scope"
+                } else {
+                    "key"
+                };
+                findings.push(AnalysisFinding {
+                    kind: AnalysisFindingKind::MissingTranslationKey,
+                    message: format!("Translation {subject} `{key}` does not exist"),
+                    key,
+                    uri: occurrence.uri.clone(),
+                    range: occurrence.range.clone(),
+                });
+                continue;
+            }
             let Some(arguments) = occurrence.arguments.as_ref() else {
                 continue;
             };
             if arguments.uncertain {
                 continue;
             }
-            let entries = snapshot
-                .resolved_dictionary_entries(occurrence, &workspace.config().key_separator)
-                .into_iter()
-                .filter(|entry| {
-                    entry.locale == workspace.config().default_locale
-                        && entry.kind == EntryKind::Leaf
-                })
-                .collect::<Vec<_>>();
-            if entries.is_empty() {
-                continue;
-            }
             let required = entries
                 .iter()
+                .filter(|entry| entry.kind == EntryKind::Leaf)
                 .filter_map(|entry| entry.value.as_deref())
                 .flat_map(interpolation_placeholders)
                 .collect::<BTreeSet<_>>();
@@ -1321,56 +1422,68 @@ fn diagnostic_notifications(
                 .iter()
                 .filter(|name| !supplied.contains(name.as_str()))
             {
-                if let Some(range) =
-                    location(&snapshot, &occurrence.uri, &occurrence.range).map(|l| l.range)
-                {
-                    by_uri
-                        .entry(occurrence.uri.clone())
-                        .or_default()
-                        .push(Diagnostic {
-                            range,
-                            severity: Some(DiagnosticSeverity::ERROR),
-                            code: Some(NumberOrString::String(
-                                "missing-interpolation-value".into(),
-                            )),
-                            code_description: None,
-                            source: Some("locale-breeze".into()),
-                            message: format!(
-                                "Translation value requires interpolation argument `{missing}`"
-                            ),
-                            related_information: None,
-                            tags: None,
-                            data: None,
-                        });
-                }
+                findings.push(AnalysisFinding {
+                    kind: AnalysisFindingKind::MissingInterpolationValue,
+                    message: format!(
+                        "Translation value requires interpolation argument `{missing}`"
+                    ),
+                    key: key.clone(),
+                    uri: occurrence.uri.clone(),
+                    range: occurrence.range.clone(),
+                });
             }
             for extra in arguments
                 .supplied
                 .iter()
                 .filter(|argument| argument.name != "count" && !required.contains(&argument.name))
             {
-                if let Some(range) =
-                    location(&snapshot, &occurrence.uri, &extra.range).map(|l| l.range)
-                {
-                    by_uri
-                        .entry(occurrence.uri.clone())
-                        .or_default()
-                        .push(Diagnostic {
-                            range,
-                            severity: Some(DiagnosticSeverity::ERROR),
-                            code: Some(NumberOrString::String("extra-interpolation-value".into())),
-                            code_description: None,
-                            source: Some("locale-breeze".into()),
-                            message: format!(
-                                "Translation value does not use interpolation argument `{}`",
-                                extra.name
-                            ),
-                            related_information: None,
-                            tags: None,
-                            data: None,
-                        });
-                }
+                findings.push(AnalysisFinding {
+                    kind: AnalysisFindingKind::ExtraInterpolationValue,
+                    message: format!(
+                        "Translation value does not use interpolation argument `{}`",
+                        extra.name
+                    ),
+                    key: key.clone(),
+                    uri: occurrence.uri.clone(),
+                    range: extra.range.clone(),
+                });
             }
+        }
+    }
+    findings.sort_by(|left, right| {
+        left.uri
+            .as_str()
+            .cmp(right.uri.as_str())
+            .then(left.range.0.start.cmp(&right.range.0.start))
+            .then(left.range.0.end.cmp(&right.range.0.end))
+            .then(left.kind.code().cmp(right.kind.code()))
+            .then(left.message.cmp(&right.message))
+    });
+    findings
+}
+
+fn diagnostic_notifications(
+    workspace: &WorkspaceIndex,
+    published: &Mutex<HashMap<Url, Vec<Diagnostic>>>,
+) -> Vec<Notification> {
+    let snapshot = workspace.snapshot();
+    let mut by_uri: HashMap<Url, Vec<Diagnostic>> = HashMap::new();
+    for finding in analysis_findings(workspace, &snapshot)
+        .into_iter()
+        .filter(|finding| finding.kind != AnalysisFindingKind::MissingTranslationKey)
+    {
+        if let Some(range) = location(&snapshot, &finding.uri, &finding.range).map(|l| l.range) {
+            by_uri.entry(finding.uri).or_default().push(Diagnostic {
+                range,
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: Some(NumberOrString::String(finding.kind.code().into())),
+                code_description: None,
+                source: Some("locale-breeze".into()),
+                message: finding.message,
+                related_information: None,
+                tags: None,
+                data: None,
+            });
         }
     }
     let mut ignored_seen = HashSet::new();
@@ -1866,6 +1979,15 @@ impl WorkspaceIssue {
                 None,
                 None,
             ),
+            ConfigError::DuplicateScopedMethod { function, method } => (
+                "config_value",
+                format!(
+                    "Scoped function `{function}` uses `{method}` as both its translation and key method"
+                ),
+                "Configure different names for `translationMethod` and `keyMethod`.".into(),
+                None,
+                None,
+            ),
             ConfigError::InvalidDictionary { path: dictionary, message, line, column } => {
                 return Self {
                     version: 1,
@@ -1946,7 +2068,9 @@ fn json_config_error_details(error: &serde_json::Error) -> (&'static str, String
 
 fn typescript_config_expectation(message: &str) -> Option<&'static str> {
     if message.contains("expected struct ScopedFunctionConfig") {
-        Some("{ functionName: string; defaultNamespace?: string; translationMethods: string[] }")
+        Some(
+            "{ functionName: string; defaultNamespace?: string; translationMethod?: string; keyMethod?: string }",
+        )
     } else if message.contains("expected struct FullKeyFunctionConfig") {
         Some("{ functionName: string; defaultNamespace?: string }")
     } else {
@@ -1966,16 +2090,115 @@ mod tests {
     use super::*;
 
     #[test]
-    fn validates_interpolation_arguments_across_plural_variants() {
+    fn workspace_report_includes_static_missing_keys_and_interpolation_mismatches() {
         let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("locale-breeze.json");
         std::fs::write(
-            temp.path().join("locale-breeze.json"),
-            r#"{"dictionaries":"translation.{locale}.json","defaultLocale":"en","scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],"fullKeyFunctions":[{"functionName":"translate"}]}"#,
+            &config_path,
+            r#"{
+              "dictionaries":"translation.{locale}.json",
+              "defaultLocale":"en",
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod": "t"}],
+              "fullKeyFunctions":[{"functionName":"translate"}],
+              "translationKeyTypes":["TranslationKey"],
+              "translationKeyProps":["transKey"]
+            }"#,
         )
         .unwrap();
         std::fs::write(
             temp.path().join("translation.en.json"),
-            r#"{"item_one":"One {{name}}","item_many":"Many {{ total }} for {{name}}","plain":"Hello {{name}}"}"#,
+            r#"{"item_one":"One {{name}}","item_many":"Many {{total}} for {{name}}"}"#,
+        )
+        .unwrap();
+        let source_path = temp.path().join("app.tsx");
+        std::fs::write(
+            &source_path,
+            concat!(
+                "i18next.t('missing');\n",
+                "i18next.t('item', { count, name, extra });\n",
+                "useScopedTranslation('MissingScope');\n",
+                "const typed: TranslationKey = 'TypedMissing';\n",
+                "const props = { transKey: 'PropMissing' };\n",
+                "i18next.t(`dynamic.${value}`);"
+            ),
+        )
+        .unwrap();
+        let workspace =
+            Arc::new(WorkspaceIndex::load(temp.path().to_owned(), &config_path).unwrap());
+        let snapshot = workspace.snapshot();
+        let findings = analysis_findings(&workspace, &snapshot);
+        assert_eq!(findings.len(), 6);
+        assert_eq!(
+            findings
+                .iter()
+                .map(|finding| finding.kind.code())
+                .collect::<Vec<_>>(),
+            [
+                "missing-translation-key",
+                "missing-interpolation-value",
+                "extra-interpolation-value",
+                "missing-translation-key",
+                "missing-translation-key",
+                "missing-translation-key",
+            ]
+        );
+        assert!(findings.iter().any(|finding| finding.key == "TypedMissing"));
+        assert!(findings.iter().any(|finding| finding.key == "PropMissing"));
+        assert!(!findings.iter().any(|finding| finding.key == "dynamic"));
+        let source_uri = Url::from_file_path(&source_path).unwrap();
+        let diagnostic_params = diagnostic_notifications(&workspace, &Mutex::new(HashMap::new()))
+            .into_iter()
+            .map(|notification| {
+                serde_json::from_value::<PublishDiagnosticsParams>(notification.params).unwrap()
+            })
+            .find(|params| params.uri == source_uri)
+            .unwrap();
+        assert_eq!(diagnostic_params.diagnostics.len(), 2);
+        assert!(diagnostic_params.diagnostics.iter().all(|diagnostic| {
+            diagnostic.code != Some(NumberOrString::String("missing-translation-key".into()))
+        }));
+
+        let server = Server {
+            workspaces: vec![workspace],
+            workspace_roots: HashSet::new(),
+            watchers: vec![],
+            config_override: None,
+            preferences: WorkspacePreferences::default(),
+            published_diagnostics: Default::default(),
+        };
+        let value = server
+            .execute_command(ExecuteCommandParams {
+                command: WORKSPACE_REPORT_COMMAND.into(),
+                arguments: vec![serde_json::json!({
+                    "workspaceRoot": temp.path().display().to_string()
+                })],
+                work_done_progress_params: Default::default(),
+            })
+            .unwrap()
+            .unwrap();
+        let report: WorkspaceReportResult = serde_json::from_value(value).unwrap();
+        assert_eq!(report.version, 1);
+        assert_eq!(report.generation, snapshot.generation);
+        assert_eq!(report.findings.len(), findings.len());
+        assert!(
+            report
+                .findings
+                .windows(2)
+                .all(|pair| pair[0].uri.as_str() <= pair[1].uri.as_str())
+        );
+    }
+
+    #[test]
+    fn validates_interpolation_arguments_across_plural_variants() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("locale-breeze.json"),
+            r#"{"dictionaries":"translation.{locale}.json","defaultLocale":"en","scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod":"t","keyMethod":"key"}],"fullKeyFunctions":[{"functionName":"translate"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("translation.en.json"),
+            r#"{"item_one":"One {{name}}","item_many":"Many {{ total }} for {{name}}","plain":"Hello {{name}}","testRunsFound":"{{count}} test runs found","testRunsFound_one":"One run","Page":{"keyOnly":"Hello {{name}}"}}"#,
         )
         .unwrap();
         let source_path = temp.path().join("app.ts");
@@ -1984,7 +2207,10 @@ mod tests {
             concat!(
                 "i18next.t('item', { count, name, extra });\n",
                 "i18next.t('plain', {});\n",
-                "i18next.t('plain', { ...values, extra });"
+                "i18next.t('plain', { ...values, extra });\n",
+                "i18next.t('testRunsFound', { count: testRuns.length });\n",
+                "const scoped = useScopedTranslation('Page');\n",
+                "scoped.key('keyOnly', { count: 2, extra: true });"
             ),
         )
         .unwrap();
@@ -2024,6 +2250,13 @@ mod tests {
                 .iter()
                 .all(|diagnostic| diagnostic.range.start.line < 2)
         );
+
+        let findings = analysis_findings(&workspace, &workspace.snapshot());
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.key != "testRunsFound" && finding.key != "Page.keyOnly")
+        );
     }
 
     #[test]
@@ -2053,7 +2286,7 @@ mod tests {
             r#"{
               "dictionaries":"translation.{locale}.json",
               "defaultLocale":"en",
-              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod": "t"}],
               "fullKeyFunctions":[{"functionName":"translate"}]
             }"#,
         )
@@ -2145,7 +2378,7 @@ mod tests {
         );
         assert_eq!(
             issue.summary,
-            "Invalid LocaleBreeze configuration value. Expected { functionName: string; defaultNamespace?: string; translationMethods: string[] }"
+            "Invalid LocaleBreeze configuration value. Expected { functionName: string; defaultNamespace?: string; translationMethod?: string; keyMethod?: string }"
         );
 
         let syntax = serde_json::from_str::<locale_breeze_core::Config>("{").unwrap_err();
@@ -2221,7 +2454,7 @@ mod tests {
             r#"{
               "dictionaries":"../translations/translation.{locale}.json",
               "defaultLocale":"en",
-              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod": "t"}],
               "fullKeyFunctions":[{"functionName":"translate"}]
             }"#,
         )
@@ -2269,7 +2502,7 @@ mod tests {
               "dictionaries":"{locale}/{namespace}.json",
               "defaultLocale":"en",
               "defaultNamespace":"common",
-              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod": "t"}],
               "fullKeyFunctions":[{"functionName":"translate"}]
             }"#,
         )
@@ -2341,7 +2574,7 @@ mod tests {
               "dictionaries":"translation.{locale}.json",
               "defaultLocale":"en",
               "keySeparator":".",
-              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod": "t"}],
               "fullKeyFunctions":[{"functionName":"translate"}]
             }"#,
         )
@@ -2414,7 +2647,7 @@ mod tests {
               "dictionaries":"translation.{locale}.json",
               "defaultLocale":"en",
               "keySeparator":".",
-              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod": "t"}],
               "fullKeyFunctions":[{"functionName":"translate"}]
             }"#,
         )
@@ -2461,7 +2694,7 @@ mod tests {
               "dictionaries":"translation.{locale}.json",
               "defaultLocale":"en",
               "keySeparator":".",
-              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod": "t"}],
               "fullKeyFunctions":[{"functionName":"translate"}]
             }"#,
         )
@@ -2570,7 +2803,7 @@ mod tests {
               "defaultLocale":"en",
               "defaultNamespace":"common",
               "keySeparator":"/",
-              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod": "t"}],
               "fullKeyFunctions":[{"functionName":"translate"}]
             }"#,
         )
@@ -2624,7 +2857,7 @@ mod tests {
             r#"{
               "dictionaries":"translation.{locale}.json",
               "defaultLocale":"en",
-              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod": "t"}],
               "fullKeyFunctions":[{"functionName":"translate"}]
             }"#,
         )
@@ -2655,7 +2888,7 @@ mod tests {
             r#"{
               "dictionaries":"translation.{locale}.json",
               "defaultLocale":"en",
-              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod": "t"}],
               "fullKeyFunctions":[{"functionName":"translate"}]
             }"#,
         )
@@ -2689,7 +2922,7 @@ mod tests {
             r#"{
               "dictionaries":"translation.{locale}.json",
               "defaultLocale":"en",
-              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod": "t"}],
               "fullKeyFunctions":[{"functionName":"translate"}]
             }"#,
         )
@@ -2716,7 +2949,7 @@ mod tests {
             r#"{
               "dictionaries":"translation.{locale}.json",
               "defaultLocale":"en",
-              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod": "t"}],
               "fullKeyFunctions":[{"functionName":"translate"}]
             }"#,
         )
@@ -2749,7 +2982,7 @@ mod tests {
             r#"{
               "dictionaries":"translation.{locale}.json",
               "defaultLocale":"en",
-              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod": "t"}],
               "fullKeyFunctions":[{"functionName":"translate"}],
               "ignoredScopes":["Server_Errors"]
             }"#,
