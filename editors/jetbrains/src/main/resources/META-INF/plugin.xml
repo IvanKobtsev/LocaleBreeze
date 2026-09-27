@@ -65,6 +65,7 @@
     <gotoDeclarationHandler
         implementation="dev.localebreeze.jetbrains.LocaleBreezeGotoDeclarationHandler"
         order="first"/>
+    <findUsagesHandlerFactory implementation="dev.localebreeze.jetbrains.LocaleBreezeFindUsagesHandlerFactory"/>
     <postStartupActivity implementation="dev.localebreeze.jetbrains.LocaleBreezeProjectActivity"/>
     <annotator language="JavaScript" implementationClass="dev.localebreeze.jetbrains.LocaleBreezeKeyAnnotator"/>
     <annotator language="JavaScript JSX" implementationClass="dev.localebreeze.jetbrains.LocaleBreezeKeyAnnotator"/>

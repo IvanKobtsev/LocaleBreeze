@@ -2,13 +2,14 @@ package dev.localebreeze.jetbrains
 
 import com.intellij.json.psi.JsonProperty
 import com.intellij.codeInsight.navigation.actions.GotoDeclarationHandler
+import com.intellij.openapi.actionSystem.ActionManager
+import com.intellij.openapi.actionSystem.ActionPlaces
 import com.intellij.openapi.actionSystem.DataContext
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.openapi.util.SystemInfoRt
-import com.intellij.openapi.util.TextRange
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.platform.lsp.api.LspClient
 import com.intellij.platform.lsp.api.LspClientManager
@@ -18,9 +19,6 @@ import com.intellij.psi.SmartPointerManager
 import com.intellij.psi.SmartPsiElementPointer
 import com.intellij.psi.impl.FakePsiElement
 import com.intellij.psi.util.PsiTreeUtil
-import com.intellij.openapi.ui.popup.JBPopupFactory
-import com.intellij.ui.SimpleListCellRenderer
-import com.intellij.ui.awt.RelativePoint
 import com.intellij.util.concurrency.AppExecutorUtil
 import org.eclipse.lsp4j.DefinitionParams
 import org.eclipse.lsp4j.ExecuteCommandParams
@@ -29,7 +27,6 @@ import org.eclipse.lsp4j.ReferenceContext
 import org.eclipse.lsp4j.ReferenceParams
 import java.util.concurrent.Callable
 import java.util.concurrent.TimeUnit
-import javax.swing.JList
 
 /**
  * Makes LocaleBreeze navigation authoritative when the server recognizes a key.
@@ -225,49 +222,16 @@ private class LocaleBreezeUsagesTarget(
             return
         }
 
-        val popupLocation = RelativePoint.getCenterOf(editor.contentComponent)
-        if (validUsages.isEmpty()) {
-            JBPopupFactory.getInstance().createMessage("No LocaleBreeze usages found").show(popupLocation)
-            return
-        }
-        JBPopupFactory.getInstance()
-            .createPopupChooserBuilder(validUsages)
-            .setTitle("LocaleBreeze usages")
-            .setRenderer(object : SimpleListCellRenderer<PsiElement>() {
-                override fun customize(
-                    list: JList<out PsiElement>,
-                    usage: PsiElement,
-                    index: Int,
-                    selected: Boolean,
-                    hasFocus: Boolean,
-                ) {
-                    val file = usage.containingFile?.virtualFile
-                    val document = file?.let { FileDocumentManager.getInstance().getDocument(it) }
-                    val lineIndex = document?.getLineNumber(usage.textOffset)
-                    val line = lineIndex?.plus(1)
-                    val preview = if (document != null && lineIndex != null) {
-                        document.getText(
-                            TextRange(
-                                document.getLineStartOffset(lineIndex),
-                                document.getLineEndOffset(lineIndex),
-                            ),
-                        ).trim()
-                    } else {
-                        usage.text.replace('\n', ' ').trim()
-                    }
-                    val location = buildString {
-                        append(file?.presentableName ?: usage.containingFile?.name ?: "Usage")
-                        if (line != null) append(':').append(line)
-                    }
-                    text = "$location — $preview"
-                }
-            })
-            .setItemChosenCallback { usage ->
-                val file = usage.containingFile?.virtualFile ?: return@setItemChosenCallback
-                OpenFileDescriptor(usage.project, file, usage.textOffset).navigate(true)
-            }
-            .createPopup()
-            .show(popupLocation)
+        declaration.putUserData(localeBreezeUsagesKey, usagePointers)
+        val actionManager = ActionManager.getInstance()
+        val action = actionManager.getAction("ShowUsages") ?: return
+        actionManager.tryToExecute(
+            action,
+            null,
+            editor.contentComponent,
+            ActionPlaces.UNKNOWN,
+            true,
+        )
     }
 }
 
