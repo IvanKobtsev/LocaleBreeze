@@ -1,4 +1,4 @@
-package dev.localebreeze.jetbrains
+package dev.localebreeze.androidstudio
 
 import com.google.gson.Gson
 import com.intellij.icons.AllIcons
@@ -14,7 +14,6 @@ import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.util.IconLoader
 import com.intellij.openapi.util.text.StringUtil
 import com.intellij.openapi.vfs.LocalFileSystem
-import com.intellij.platform.lsp.api.LspClientManager
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
 import com.intellij.ui.JBColor
@@ -57,7 +56,6 @@ import javax.swing.Scrollable
 import javax.swing.SwingUtilities
 import javax.swing.JTextArea
 import javax.swing.JToggleButton
-import org.eclipse.lsp4j.ExecuteCommandParams
 
 internal data class LocaleBreezeWorkspaceReport(
     val version: Int = 1,
@@ -321,7 +319,7 @@ private class LocaleBreezeToolWindowPanel(
             add(metric(status.dictionaryFileCount.toString(), "Dictionaries"))
             if (dictionaryRootNeedsAttachment(status)) {
                 add(Box.createVerticalStrut(12))
-                add(WrappingText("The dictionary directory is outside this WebStorm project. Attach it to enable standard editor diagnostics."))
+                add(WrappingText("The dictionary directory is outside this Android Studio project. Attach it to enable standard editor diagnostics."))
                 add(Box.createVerticalStrut(8))
                 add(cardButton("Attach dictionary directory", primary = true) {
                     attachDictionaryRoot(status)
@@ -347,27 +345,14 @@ private class LocaleBreezeToolWindowPanel(
         val requestId = reportRequests.incrementAndGet()
         reportState = ProjectReportState.Loading
         render()
-        val clients = LspClientManager.getInstance(project)
-            .getClients(LocaleBreezeLspIntegrationProvider::class.java)
-        if (clients.isEmpty()) {
-            reportState = ProjectReportState.Failed("The LocaleBreeze language server is not running.")
-            render()
-            return
-        }
         AppExecutorUtil.getAppExecutorService().execute {
             val result = runCatching {
-                val payload = clients.firstNotNullOfOrNull { client ->
-                    runCatching {
-                        client.sendRequestSync(10_000) { server ->
-                            server.workspaceService.executeCommand(
-                                ExecuteCommandParams(
-                                    "localeBreeze.workspaceReport",
-                                    listOf(mapOf("workspaceRoot" to status.workspaceRoot)),
-                                ),
-                            )
-                        }
-                    }.getOrNull()
-                } ?: error("The language server returned no report.")
+                val payload = LocaleBreezeLsp4ij.execute(
+                    project,
+                    "localeBreeze.workspaceReport",
+                    listOf(mapOf("workspaceRoot" to status.workspaceRoot)),
+                    10_000,
+                ) ?: error("The language server returned no report.")
                 gson.fromJson(gson.toJsonTree(payload), LocaleBreezeWorkspaceReport::class.java)
             }
             SwingUtilities.invokeLater {
@@ -496,7 +481,7 @@ private class LocaleBreezeToolWindowPanel(
         if (!project.service<LocaleBreezeContentRoots>().attach(root.toNioPath())) {
             Messages.showErrorDialog(
                 project,
-                "WebStorm could not attach the dictionary directory to this project.",
+                "Android Studio could not attach the dictionary directory to this project.",
                 "LocaleBreeze",
             )
             return

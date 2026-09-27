@@ -7,21 +7,27 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const output = join(root, 'dist', 'editors');
 const staging = join(root, 'target', 'editor-release-staging');
 const vscodeRoot = join(root, 'editors', 'vscode');
-const jetbrainsRoot = join(root, 'editors', 'jetbrains');
+const webstormRoot = join(root, 'editors', 'jetbrains');
+const androidStudioRoot = join(root, 'editors', 'android-studio');
 const npmPlatforms = join(root, 'npm', 'platforms');
 const targets = [
   ['win32-x64', 'locale-breeze.exe'], ['win32-arm64', 'locale-breeze.exe'],
   ['darwin-x64', 'locale-breeze'], ['darwin-arm64', 'locale-breeze'],
   ['linux-x64', 'locale-breeze'], ['linux-arm64', 'locale-breeze'],
 ];
-const only = process.argv.includes('--vscode-only') ? 'vscode'
-  : process.argv.includes('--jetbrains-only') ? 'jetbrains' : undefined;
+const modes = process.argv.includes('--vscode-only') ? new Set(['vscode'])
+  : process.argv.includes('--webstorm-only') ? new Set(['webstorm'])
+  : process.argv.includes('--android-studio-only') ? new Set(['android-studio'])
+  : process.argv.includes('--jetbrains-only') ? new Set(['webstorm', 'android-studio'])
+  : new Set(['vscode', 'webstorm', 'android-studio']);
 
 run(process.execPath, [join(root, 'scripts', 'verify-npm-packages.mjs'), '--require-binaries']);
 rmSync(staging, { recursive: true, force: true });
 mkdirSync(output, { recursive: true });
-if (only !== 'jetbrains') packageVsCode();
-if (only !== 'vscode') packageJetBrains();
+if (modes.has('vscode')) packageVsCode();
+if (modes.has('webstorm') || modes.has('android-studio')) stageJetBrainsBinaries();
+if (modes.has('webstorm')) packageWebStorm();
+if (modes.has('android-studio')) packageAndroidStudio();
 console.log(`Editor release artifacts are ready in ${output}`);
 
 function packageVsCode() {
@@ -53,7 +59,7 @@ function packageVsCode() {
   }
 }
 
-function packageJetBrains() {
+function stageJetBrainsBinaries() {
   const nativeRoot = join(root, 'dist', 'jetbrains');
   rmSync(nativeRoot, { recursive: true, force: true });
   for (const [target, binaryName] of targets) {
@@ -64,16 +70,29 @@ function packageJetBrains() {
     copyFileSync(source, destination);
     if (!target.startsWith('win32-')) chmodSync(destination, 0o755);
   }
-  const wrapper = join(jetbrainsRoot, process.platform === 'win32' ? 'gradlew.bat' : 'gradlew');
+}
+
+function packageWebStorm() {
+  packageJetBrainsPlugin(webstormRoot, 'locale-breeze-jetbrains', 'locale-breeze-webstorm', []);
+}
+
+function packageAndroidStudio() {
+  packageJetBrainsPlugin(androidStudioRoot, 'locale-breeze-android-studio', 'locale-breeze-android-studio', [
+    'verifyNoNativeLsp', 'verifyPlugin',
+  ]);
+}
+
+function packageJetBrainsPlugin(pluginRoot, builtName, artifactName, extraTasks) {
+  const wrapper = join(pluginRoot, process.platform === 'win32' ? 'gradlew.bat' : 'gradlew');
   if (process.platform !== 'win32') chmodSync(wrapper, 0o755);
   run(wrapper, [
-    'buildPlugin', 'verifyPluginStructure', 'verifyPlugin', 'verifyBundledBinaries',
+    'buildPlugin', 'test', 'verifyPluginStructure', 'verifyBundledBinaries', ...extraTasks,
     '--rerun-tasks', '--no-configuration-cache',
-  ], jetbrainsRoot);
-  const version = readProperties(join(jetbrainsRoot, 'gradle.properties')).version;
-  const built = join(jetbrainsRoot, 'build', 'distributions', `locale-breeze-jetbrains-${version}.zip`);
+  ], pluginRoot);
+  const version = readProperties(join(pluginRoot, 'gradle.properties')).version;
+  const built = join(pluginRoot, 'build', 'distributions', `${builtName}-${version}.zip`);
   requireNonEmpty(built);
-  const artifact = join(output, `locale-breeze-jetbrains-${version}.zip`);
+  const artifact = join(output, `${artifactName}-${version}.zip`);
   copyFileSync(built, artifact);
   requireNonEmpty(artifact);
 }

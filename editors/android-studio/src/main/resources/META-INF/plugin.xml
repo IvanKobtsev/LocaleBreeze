@@ -1,0 +1,41 @@
+<idea-plugin>
+  <id>dev.localebreeze.androidstudio</id>
+  <name>LocaleBreeze for Android Studio</name>
+  <vendor url="https://github.com/IvanKobtsev/LocaleBreeze">Ivan Kobtsev</vendor>
+  <description><![CDATA[
+    Context-aware i18n completion, navigation, references, unused-key hints, and persistent workspace health for Android Studio.
+  ]]></description>
+
+  <depends>com.intellij.modules.platform</depends>
+  <depends>com.intellij.modules.json</depends>
+  <depends>com.redhat.devtools.lsp4ij</depends>
+
+  <extensions defaultExtensionNs="com.redhat.devtools.lsp4ij">
+    <server id="locale-breeze" name="LocaleBreeze" factoryClass="dev.localebreeze.androidstudio.LocaleBreezeLsp4ijServerFactory">
+      <description><![CDATA[Context-aware navigation and completion for LocaleBreeze translation dictionaries.]]></description>
+    </server>
+    <fileNamePatternMapping patterns="*.js;*.jsx;*.ts;*.tsx;*.json" serverId="locale-breeze"/>
+  </extensions>
+
+  <extensions defaultExtensionNs="com.intellij">
+    <gotoDeclarationHandler implementation="dev.localebreeze.androidstudio.LocaleBreezeGotoDeclarationHandler" order="first"/>
+    <postStartupActivity implementation="dev.localebreeze.androidstudio.LocaleBreezeProjectActivity"/>
+    <annotator language="any" implementationClass="dev.localebreeze.androidstudio.LocaleBreezeKeyAnnotator"/>
+    <colorSettingsPage implementation="dev.localebreeze.androidstudio.LocaleBreezeColorSettingsPage"/>
+    <projectConfigurable id="dev.localebreeze.androidstudio.settings" displayName="LocaleBreeze" instance="dev.localebreeze.androidstudio.LocaleBreezeConfigurable"/>
+    <notificationGroup id="LocaleBreeze" displayType="BALLOON"/>
+    <toolWindow id="LocaleBreeze" anchor="right" icon="/icons/tool_window_icon/default/localeBreeze.svg" factoryClass="dev.localebreeze.androidstudio.LocaleBreezeToolWindowFactory"/>
+  </extensions>
+
+  <actions>
+    <action id="dev.localebreeze.androidstudio.CopyFullKey" class="dev.localebreeze.androidstudio.LocaleBreezeCopyFullKeyAction" text="Copy Full Translation Key" description="Copy the full LocaleBreeze translation key path">
+      <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+    </action>
+    <action id="dev.localebreeze.androidstudio.CopyFullKeyWithNamespace" class="dev.localebreeze.androidstudio.LocaleBreezeCopyFullKeyWithNamespaceAction" text="Copy Full Translation Key with Namespace" description="Copy the full LocaleBreeze translation key path prefixed by its namespace">
+      <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+    </action>
+    <action id="dev.localebreeze.androidstudio.AddTranslationKey" class="dev.localebreeze.androidstudio.LocaleBreezeAddKeyAction" text="Add Translation Key…" description="Add the missing key to the default-locale translation file">
+      <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+    </action>
+  </actions>
+</idea-plugin>

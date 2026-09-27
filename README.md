@@ -4,7 +4,9 @@ LocaleBreeze provides context-aware i18n navigation and completion for JetBrains
 
 ## Install
 
-[Install LocaleBreeze for JetBrains IDEs](https://plugins.jetbrains.com/plugin/33774-localebreeze)
+[Install LocaleBreeze for WebStorm](https://plugins.jetbrains.com/plugin/33774-localebreeze)
+
+Android Studio uses a separate `LocaleBreeze for Android Studio` plugin package backed by LSP4IJ. Until its separate Marketplace listing is published, contributors can build it from `editors/android-studio`.
 
 The plugin runs all analysis locally: no project source or translations leave your machine.
 
@@ -115,7 +117,7 @@ With the six native npm-package binaries populated and the VS Code dependencies 
 node scripts/package-editors.mjs
 ```
 
-This produces six platform-specific VSIX files and one all-platform JetBrains plugin ZIP under `dist/editors/`. Pass `--vscode-only` or `--jetbrains-only` to build only one editor integration. The JetBrains build requires JDK 25 through `JAVA_HOME`.
+This produces six platform-specific VSIX files plus independent WebStorm and Android Studio plugin ZIPs under `dist/editors/`. Pass `--vscode-only`, `--webstorm-only`, or `--android-studio-only` to build one integration; `--jetbrains-only` builds both JetBrains packages. The JetBrains builds require JDK 25 through `JAVA_HOME`.
 
 For VS Code development, install the dependencies in `editors/vscode`, run its compile script, and either copy the server into `bin/<platform>-<arch>/` or set `localeBreeze.server.path`.
 
