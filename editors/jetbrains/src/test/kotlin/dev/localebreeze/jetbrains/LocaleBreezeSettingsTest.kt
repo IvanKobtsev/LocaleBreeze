@@ -1,5 +1,8 @@
 package dev.localebreeze.jetbrains
 
+import java.time.Instant
+import java.time.ZoneId
+import java.util.Locale
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -102,11 +105,19 @@ class LocaleBreezeSettingsTest {
     }
 
     @Test
-    fun `project report becomes stale after the workspace generation changes`() {
-        val report = LocaleBreezeWorkspaceReport(workspaceRoot = "project", generation = 4)
+    fun `project report timestamp uses the requested locale and time zone`() {
+        val generatedAt = Instant.parse("2026-09-27T14:35:00Z")
 
-        assertFalse(reportIsStale(report, LocaleBreezeWorkspaceStatus(workspaceRoot = "project", generation = 4)))
-        assertTrue(reportIsStale(report, LocaleBreezeWorkspaceStatus(workspaceRoot = "project", generation = 5)))
-        assertTrue(reportIsStale(report, LocaleBreezeWorkspaceStatus(workspaceRoot = "other", generation = 4)))
+        assertEquals(
+            "Sep 27, 2026, 2:35 PM",
+            formatReportGeneratedAt(generatedAt, ZoneId.of("UTC"), Locale.US),
+        )
+    }
+
+    @Test
+    fun `project health view toggles only while available`() {
+        assertTrue(nextProjectHealthViewState(current = false, available = true))
+        assertFalse(nextProjectHealthViewState(current = true, available = true))
+        assertFalse(nextProjectHealthViewState(current = false, available = false))
     }
 }

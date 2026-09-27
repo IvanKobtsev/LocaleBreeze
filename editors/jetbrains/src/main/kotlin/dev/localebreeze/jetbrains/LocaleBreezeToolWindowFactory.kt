@@ -37,6 +37,11 @@ import java.awt.Rectangle
 import java.awt.RenderingHints
 import java.nio.file.Path
 import java.net.URI
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
 import javax.swing.Box
 import javax.swing.BoxLayout
@@ -51,6 +56,7 @@ import javax.swing.JSeparator
 import javax.swing.Scrollable
 import javax.swing.SwingUtilities
 import javax.swing.JTextArea
+import javax.swing.JToggleButton
 import org.eclipse.lsp4j.ExecuteCommandParams
 
 internal data class LocaleBreezeWorkspaceReport(
@@ -68,13 +74,22 @@ internal data class LocaleBreezeReportFinding(
     val range: org.eclipse.lsp4j.Range = org.eclipse.lsp4j.Range(),
 )
 
-internal fun reportIsStale(report: LocaleBreezeWorkspaceReport, status: LocaleBreezeWorkspaceStatus): Boolean =
-    report.workspaceRoot != status.workspaceRoot || report.generation != status.generation
+internal fun formatReportGeneratedAt(
+    instant: Instant,
+    zoneId: ZoneId = ZoneId.systemDefault(),
+    locale: Locale = Locale.getDefault(),
+): String = DateTimeFormatter
+    .ofLocalizedDateTime(FormatStyle.MEDIUM, FormatStyle.SHORT)
+    .withLocale(locale)
+    .format(instant.atZone(zoneId))
+
+internal fun nextProjectHealthViewState(current: Boolean, available: Boolean): Boolean =
+    available && !current
 
 private sealed interface ProjectReportState {
     data object Idle : ProjectReportState
     data object Loading : ProjectReportState
-    data class Ready(val report: LocaleBreezeWorkspaceReport) : ProjectReportState
+    data class Ready(val report: LocaleBreezeWorkspaceReport, val generatedAt: Instant) : ProjectReportState
     data class Failed(val message: String) : ProjectReportState
 }
 
@@ -108,6 +123,7 @@ private class LocaleBreezeToolWindowPanel(
     private val reportRequests = AtomicLong()
     private val gson = Gson()
     private var reportState: ProjectReportState = ProjectReportState.Idle
+    private var projectHealthViewOpen = false
 
     init {
         body.layout = BoxLayout(body, BoxLayout.Y_AXIS)
@@ -149,6 +165,7 @@ private class LocaleBreezeToolWindowPanel(
             state.lifecycle == LocaleBreezeLifecycle.WAITING -> renderWaiting()
             state.lifecycle == LocaleBreezeLifecycle.STARTING -> renderStarting()
             state.lifecycle == LocaleBreezeLifecycle.UNAVAILABLE -> renderUnavailable()
+            projectHealthViewOpen && state.status != null -> renderProjectHealthView(state.status)
             else -> renderHealthy(state.status)
         }
 
@@ -310,16 +327,19 @@ private class LocaleBreezeToolWindowPanel(
                     attachDictionaryRoot(status)
                 })
             }
-            add(Box.createVerticalStrut(12))
-            add(cardButton(
-                if (reportState == ProjectReportState.Loading) "Generating report…" else "Run project health report",
-                primary = true,
-            ) {
-                runProjectReport(status)
-            }.apply {
-                isEnabled = reportState != ProjectReportState.Loading
-            })
         }
+    }
+
+    private fun renderProjectHealthView(status: LocaleBreezeWorkspaceStatus) {
+        heading("Project health")
+        body.add(cardButton(
+            if (reportState == ProjectReportState.Loading) "Generating report…" else "Run project health report",
+            primary = true,
+        ) {
+            runProjectReport(status)
+        }.apply {
+            isEnabled = reportState != ProjectReportState.Loading
+        })
         renderProjectReport(status)
     }
 
@@ -353,7 +373,7 @@ private class LocaleBreezeToolWindowPanel(
             SwingUtilities.invokeLater {
                 if (project.isDisposed || requestId != reportRequests.get()) return@invokeLater
                 reportState = result.fold(
-                    onSuccess = ProjectReportState::Ready,
+                    onSuccess = { report -> ProjectReportState.Ready(report, Instant.now()) },
                     onFailure = {
                         ProjectReportState.Failed(
                             it.message?.takeIf(String::isNotBlank)
@@ -368,7 +388,13 @@ private class LocaleBreezeToolWindowPanel(
 
     private fun renderProjectReport(status: LocaleBreezeWorkspaceStatus) {
         when (val state = reportState) {
-            ProjectReportState.Idle -> Unit
+            ProjectReportState.Idle -> {
+                body.add(Box.createVerticalStrut(12))
+                infoCard(
+                    "Project health report",
+                    "Run the report to check indexed translation usages across this project.",
+                )
+            }
             ProjectReportState.Loading -> {
                 body.add(Box.createVerticalStrut(12))
                 infoCard("Generating project health report…", "Checking indexed translation usages.") {
@@ -384,22 +410,19 @@ private class LocaleBreezeToolWindowPanel(
                     add(cardButton("Retry", primary = true) { runProjectReport(status) })
                 }
             }
-            is ProjectReportState.Ready -> renderProjectReportResult(status, state.report)
+            is ProjectReportState.Ready -> renderProjectReportResult(state.report, state.generatedAt)
         }
     }
 
     private fun renderProjectReportResult(
-        status: LocaleBreezeWorkspaceStatus,
         report: LocaleBreezeWorkspaceReport,
+        generatedAt: Instant,
     ) {
         body.add(Box.createVerticalStrut(12))
+        val generatedAtText = "Generated ${formatReportGeneratedAt(generatedAt)}."
         if (report.findings.isEmpty()) {
             infoCard("No project health issues", "All indexed translation usages are valid.") {
-                if (reportIsStale(report, status)) {
-                    add(WrappingText("This report is out of date because workspace files changed."))
-                    add(Box.createVerticalStrut(8))
-                }
-                add(cardButton("Run again") { runProjectReport(status) })
+                add(WrappingText(generatedAtText))
             }
             return
         }
@@ -407,11 +430,7 @@ private class LocaleBreezeToolWindowPanel(
             "Project health report",
             "${report.findings.size} ${if (report.findings.size == 1) "issue" else "issues"} found.",
         ) {
-            if (reportIsStale(report, status)) {
-                add(WrappingText("This report is out of date because workspace files changed."))
-                add(Box.createVerticalStrut(8))
-            }
-            add(cardButton("Run again") { runProjectReport(status) })
+            add(WrappingText(generatedAtText))
         }
         renderReportGroup(
             "Missing keys",
@@ -546,7 +565,16 @@ private class LocaleBreezeToolWindowPanel(
             "Open dictionary",
             dictionaries.isNotEmpty(),
         )
-        val openProjectHealthReportButton = iconButton(openProjectHealthReportIcon, "Open project health report", dictionaries.isNotEmpty())
+        val reportAvailable = state.status != null && dictionaries.isNotEmpty()
+        val openProjectHealthReportButton = toggleIconButton(
+            openProjectHealthReportIcon,
+            if (projectHealthViewOpen) "Close project health report" else "Open project health report",
+            reportAvailable,
+            projectHealthViewOpen && reportAvailable,
+        ) {
+            projectHealthViewOpen = nextProjectHealthViewState(projectHealthViewOpen, reportAvailable)
+            render()
+        }
         openDictionaryButton.addActionListener {
             openDictionary(dictionaries, openDictionaryButton)
         }
@@ -682,6 +710,28 @@ private class LocaleBreezeToolWindowPanel(
             border = JBUI.Borders.empty()
             action?.let { callback -> addActionListener { callback() } }
         }
+
+    private fun toggleIconButton(
+        icon: javax.swing.Icon,
+        tooltip: String,
+        enabled: Boolean,
+        selected: Boolean,
+        action: () -> Unit,
+    ): JToggleButton = ToolbarToggleIconButton(icon).apply {
+        val buttonSize = JBUI.size(26, 26)
+        preferredSize = buttonSize
+        minimumSize = buttonSize
+        maximumSize = buttonSize
+        margin = Insets(0, 0, 0, 0)
+        isEnabled = enabled
+        isSelected = selected
+        toolTipText = tooltip
+        isContentAreaFilled = false
+        isFocusPainted = false
+        isRolloverEnabled = true
+        border = JBUI.Borders.empty()
+        addActionListener { action() }
+    }
 
     private fun linkButton(text: String, action: () -> Unit): JButton = JButton("<html><u>${html(text)}</u></html>").apply {
         foreground = JBColor.namedColor("Link.activeForeground", JBColor(0x2F65CA, 0xA8C7FA))
@@ -848,6 +898,36 @@ private class LocaleBreezeToolWindowPanel(
                 val g = graphics.create() as Graphics2D
                 g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
                 g.color = if (model.isPressed) pressedBackground else hoverBackground
+                g.fillRoundRect(0, 0, width, height, JBUI.scale(6), JBUI.scale(6))
+                g.dispose()
+            }
+            super.paintComponent(graphics)
+        }
+    }
+
+    private class ToolbarToggleIconButton(icon: javax.swing.Icon) : JToggleButton(icon) {
+        private val hoverBackground = JBColor.namedColor(
+            "ActionButton.hoverBackground",
+            JBColor(Color(0xDFE1E5), Color(0x4C5052)),
+        )
+        private val selectedBackground = JBColor.namedColor(
+            "ActionButton.pressedBackground",
+            JBColor(Color(0xC9CCD1), Color(0x5A5D5F)),
+        )
+
+        override fun paintComponent(graphics: Graphics) {
+            if (!isEnabled) {
+                val g = graphics.create() as Graphics2D
+                g.composite = AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.4f)
+                super.paintComponent(g)
+                g.dispose()
+                return
+            }
+
+            if (model.isSelected || model.isRollover || model.isPressed) {
+                val g = graphics.create() as Graphics2D
+                g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+                g.color = if (model.isSelected || model.isPressed) selectedBackground else hoverBackground
                 g.fillRoundRect(0, 0, width, height, JBUI.scale(6), JBUI.scale(6))
                 g.dispose()
             }
