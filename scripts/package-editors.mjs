@@ -79,16 +79,16 @@ function packageWebStorm() {
 function packageAndroidStudio() {
   packageJetBrainsPlugin(androidStudioRoot, 'locale-breeze-android-studio', 'locale-breeze-android-studio', [
     'verifyNoNativeLsp', 'verifyPlugin',
-  ]);
+  ], 3);
 }
 
-function packageJetBrainsPlugin(pluginRoot, builtName, artifactName, extraTasks) {
+function packageJetBrainsPlugin(pluginRoot, builtName, artifactName, extraTasks, attempts = 1) {
   const wrapper = join(pluginRoot, process.platform === 'win32' ? 'gradlew.bat' : 'gradlew');
   if (process.platform !== 'win32') chmodSync(wrapper, 0o755);
-  run(wrapper, [
+  runWithRetries(wrapper, [
     'buildPlugin', 'test', 'verifyPluginStructure', 'verifyBundledBinaries', ...extraTasks,
     '--rerun-tasks', '--no-configuration-cache',
-  ], pluginRoot);
+  ], pluginRoot, attempts);
   const version = readProperties(join(pluginRoot, 'gradle.properties')).version;
   const built = join(pluginRoot, 'build', 'distributions', `${builtName}-${version}.zip`);
   requireNonEmpty(built);
@@ -104,6 +104,21 @@ function run(executable, args, cwd = root) {
   const result = spawnSync(executable, args, { cwd, stdio: 'inherit', shell: needsWindowsShell });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${executable} exited with status ${result.status}`);
+}
+function runWithRetries(executable, args, cwd, attempts) {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      run(executable, args, cwd);
+      return;
+    } catch (error) {
+      if (attempt === attempts) throw error;
+      const delaySeconds = attempt * 15;
+      console.warn(
+        `${executable} failed (attempt ${attempt}/${attempts}); retrying in ${delaySeconds}s`,
+      );
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delaySeconds * 1000);
+    }
+  }
 }
 function requireFile(path) {
   if (!existsSync(path) || !statSync(path).isFile()) throw new Error(`Missing required file: ${path}`);
