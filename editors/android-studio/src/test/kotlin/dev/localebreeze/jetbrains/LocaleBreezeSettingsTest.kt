@@ -109,7 +109,7 @@ class LocaleBreezeSettingsTest {
         val generatedAt = Instant.parse("2026-09-27T14:35:00Z")
 
         assertEquals(
-            "Sep 27, 2026, 2:35 PM",
+            "Sep 27, 2026, 2:35\u202FPM",
             formatReportGeneratedAt(generatedAt, ZoneId.of("UTC"), Locale.US),
         )
     }
