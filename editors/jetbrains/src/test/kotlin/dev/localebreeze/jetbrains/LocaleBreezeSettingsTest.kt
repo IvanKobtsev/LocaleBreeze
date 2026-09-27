@@ -100,4 +100,13 @@ class LocaleBreezeSettingsTest {
             java.nio.file.Path.of("c:/project/locale-breeze.json"),
         ))
     }
+
+    @Test
+    fun `project report becomes stale after the workspace generation changes`() {
+        val report = LocaleBreezeWorkspaceReport(workspaceRoot = "project", generation = 4)
+
+        assertFalse(reportIsStale(report, LocaleBreezeWorkspaceStatus(workspaceRoot = "project", generation = 4)))
+        assertTrue(reportIsStale(report, LocaleBreezeWorkspaceStatus(workspaceRoot = "project", generation = 5)))
+        assertTrue(reportIsStale(report, LocaleBreezeWorkspaceStatus(workspaceRoot = "other", generation = 4)))
+    }
 }

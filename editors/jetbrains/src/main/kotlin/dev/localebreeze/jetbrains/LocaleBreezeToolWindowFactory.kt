@@ -1,5 +1,6 @@
 package dev.localebreeze.jetbrains
 
+import com.google.gson.Gson
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.components.service
@@ -13,6 +14,7 @@ import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.util.IconLoader
 import com.intellij.openapi.util.text.StringUtil
 import com.intellij.openapi.vfs.LocalFileSystem
+import com.intellij.platform.lsp.api.LspClientManager
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
 import com.intellij.ui.JBColor
@@ -21,6 +23,7 @@ import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.content.ContentFactory
 import com.intellij.util.ui.JBUI
 import com.intellij.util.ui.UIUtil
+import com.intellij.util.concurrency.AppExecutorUtil
 import java.awt.AlphaComposite
 import java.awt.BorderLayout
 import java.awt.Color
@@ -33,6 +36,8 @@ import java.awt.Insets
 import java.awt.Rectangle
 import java.awt.RenderingHints
 import java.nio.file.Path
+import java.net.URI
+import java.util.concurrent.atomic.AtomicLong
 import javax.swing.Box
 import javax.swing.BoxLayout
 import javax.swing.JButton
@@ -46,6 +51,32 @@ import javax.swing.JSeparator
 import javax.swing.Scrollable
 import javax.swing.SwingUtilities
 import javax.swing.JTextArea
+import org.eclipse.lsp4j.ExecuteCommandParams
+
+internal data class LocaleBreezeWorkspaceReport(
+    val version: Int = 1,
+    val workspaceRoot: String = "",
+    val generation: Long = 0,
+    val findings: List<LocaleBreezeReportFinding> = emptyList(),
+)
+
+internal data class LocaleBreezeReportFinding(
+    val code: String = "",
+    val message: String = "",
+    val key: String = "",
+    val uri: String = "",
+    val range: org.eclipse.lsp4j.Range = org.eclipse.lsp4j.Range(),
+)
+
+internal fun reportIsStale(report: LocaleBreezeWorkspaceReport, status: LocaleBreezeWorkspaceStatus): Boolean =
+    report.workspaceRoot != status.workspaceRoot || report.generation != status.generation
+
+private sealed interface ProjectReportState {
+    data object Idle : ProjectReportState
+    data object Loading : ProjectReportState
+    data class Ready(val report: LocaleBreezeWorkspaceReport) : ProjectReportState
+    data class Failed(val message: String) : ProjectReportState
+}
 
 class LocaleBreezeToolWindowFactory : ToolWindowFactory {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
@@ -73,6 +104,9 @@ private class LocaleBreezeToolWindowPanel(
     private val restartIcon = IconLoader.getIcon("/icons/restart_icon/localeBreeze.svg", javaClass)
     private val sleepPluginIcon = IconLoader.getIcon("/icons/sleep_picture/localeBreeze.svg", javaClass)
     private val accentColor = JBColor(Color(0x3574F0), Color(0x3574F0))
+    private val reportRequests = AtomicLong()
+    private val gson = Gson()
+    private var reportState: ProjectReportState = ProjectReportState.Idle
 
     init {
         body.layout = BoxLayout(body, BoxLayout.Y_AXIS)
@@ -81,7 +115,9 @@ private class LocaleBreezeToolWindowPanel(
         render()
     }
 
-    override fun dispose() = Unit
+    override fun dispose() {
+        reportRequests.incrementAndGet()
+    }
 
     private fun render() {
         val state = model.snapshot()
@@ -273,7 +309,158 @@ private class LocaleBreezeToolWindowPanel(
                     attachDictionaryRoot(status)
                 })
             }
+            add(Box.createVerticalStrut(12))
+            add(cardButton(
+                if (reportState == ProjectReportState.Loading) "Generating report…" else "Run project health report",
+                primary = true,
+            ) {
+                runProjectReport(status)
+            }.apply {
+                isEnabled = reportState != ProjectReportState.Loading
+            })
         }
+        renderProjectReport(status)
+    }
+
+    private fun runProjectReport(status: LocaleBreezeWorkspaceStatus) {
+        val requestId = reportRequests.incrementAndGet()
+        reportState = ProjectReportState.Loading
+        render()
+        val clients = LspClientManager.getInstance(project)
+            .getClients(LocaleBreezeLspIntegrationProvider::class.java)
+        if (clients.isEmpty()) {
+            reportState = ProjectReportState.Failed("The LocaleBreeze language server is not running.")
+            render()
+            return
+        }
+        AppExecutorUtil.getAppExecutorService().execute {
+            val result = runCatching {
+                val payload = clients.firstNotNullOfOrNull { client ->
+                    runCatching {
+                        client.sendRequestSync(10_000) { server ->
+                            server.workspaceService.executeCommand(
+                                ExecuteCommandParams(
+                                    "localeBreeze.workspaceReport",
+                                    listOf(mapOf("workspaceRoot" to status.workspaceRoot)),
+                                ),
+                            )
+                        }
+                    }.getOrNull()
+                } ?: error("The language server returned no report.")
+                gson.fromJson(gson.toJsonTree(payload), LocaleBreezeWorkspaceReport::class.java)
+            }
+            SwingUtilities.invokeLater {
+                if (project.isDisposed || requestId != reportRequests.get()) return@invokeLater
+                reportState = result.fold(
+                    onSuccess = ProjectReportState::Ready,
+                    onFailure = {
+                        ProjectReportState.Failed(
+                            it.message?.takeIf(String::isNotBlank)
+                                ?: "LocaleBreeze could not generate the report.",
+                        )
+                    },
+                )
+                render()
+            }
+        }
+    }
+
+    private fun renderProjectReport(status: LocaleBreezeWorkspaceStatus) {
+        when (val state = reportState) {
+            ProjectReportState.Idle -> Unit
+            ProjectReportState.Loading -> {
+                body.add(Box.createVerticalStrut(12))
+                infoCard("Generating project health report…", "Checking indexed translation usages.") {
+                    add(JProgressBar().apply {
+                        isIndeterminate = true
+                        alignmentX = Component.LEFT_ALIGNMENT
+                    })
+                }
+            }
+            is ProjectReportState.Failed -> {
+                body.add(Box.createVerticalStrut(12))
+                infoCard("Project health report failed", state.message) {
+                    add(cardButton("Retry", primary = true) { runProjectReport(status) })
+                }
+            }
+            is ProjectReportState.Ready -> renderProjectReportResult(status, state.report)
+        }
+    }
+
+    private fun renderProjectReportResult(
+        status: LocaleBreezeWorkspaceStatus,
+        report: LocaleBreezeWorkspaceReport,
+    ) {
+        body.add(Box.createVerticalStrut(12))
+        if (report.findings.isEmpty()) {
+            infoCard("No project health issues", "All indexed translation usages are valid.") {
+                if (reportIsStale(report, status)) {
+                    add(WrappingText("This report is out of date because workspace files changed."))
+                    add(Box.createVerticalStrut(8))
+                }
+                add(cardButton("Run again") { runProjectReport(status) })
+            }
+            return
+        }
+        infoCard(
+            "Project health report",
+            "${report.findings.size} ${if (report.findings.size == 1) "issue" else "issues"} found.",
+        ) {
+            if (reportIsStale(report, status)) {
+                add(WrappingText("This report is out of date because workspace files changed."))
+                add(Box.createVerticalStrut(8))
+            }
+            add(cardButton("Run again") { runProjectReport(status) })
+        }
+        renderReportGroup(
+            "Missing keys",
+            report.findings.filter { it.code == "missing-translation-key" },
+        )
+        renderReportGroup(
+            "Interpolation arguments",
+            report.findings.filter { it.code != "missing-translation-key" },
+        )
+    }
+
+    private fun renderReportGroup(title: String, findings: List<LocaleBreezeReportFinding>) {
+        if (findings.isEmpty()) return
+        body.add(Box.createVerticalStrut(12))
+        infoCard("$title (${findings.size})", "") {
+            findings.forEachIndexed { index, finding ->
+                if (index > 0) {
+                    add(Box.createVerticalStrut(10))
+                    add(JSeparator().apply {
+                        alignmentX = Component.LEFT_ALIGNMENT
+                        maximumSize = Dimension(Int.MAX_VALUE, preferredSize.height)
+                    })
+                    add(Box.createVerticalStrut(10))
+                }
+                add(WrappingText(finding.message, emphasized = true))
+                if (finding.key.isNotBlank()) {
+                    add(Box.createVerticalStrut(4))
+                    add(WrappingText(finding.key))
+                }
+                add(Box.createVerticalStrut(4))
+                add(linkButton(reportLocation(finding)) { openReportFinding(finding) })
+            }
+        }
+    }
+
+    private fun reportLocation(finding: LocaleBreezeReportFinding): String {
+        val path = runCatching { Path.of(URI(finding.uri)) }.getOrNull()
+        val display = path?.let { relativePath(it.toString()) } ?: finding.uri
+        return "$display:${finding.range.start.line + 1}:${finding.range.start.character + 1}"
+    }
+
+    private fun openReportFinding(finding: LocaleBreezeReportFinding) {
+        val path = runCatching { Path.of(URI(finding.uri)) }.getOrNull() ?: return
+        val file = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(path) ?: return
+        OpenFileDescriptor(
+            project,
+            file,
+            finding.range.start.line,
+            finding.range.start.character,
+        ).navigate(true)
     }
 
     private fun dictionaryRootNeedsAttachment(status: LocaleBreezeWorkspaceStatus): Boolean {

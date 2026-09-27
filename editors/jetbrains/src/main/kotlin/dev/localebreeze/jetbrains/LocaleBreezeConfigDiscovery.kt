@@ -247,7 +247,7 @@ class LocaleBreezeConfigDiscovery(private val project: Project) {
   "defaultNamespace": "translation",
   "keySeparator": ".",
   "scopedFunctions": [
-    { "functionName": "useScopedTranslation", "translationMethods": ["t"] }
+    { "functionName": "useScopedTranslation", "translationMethod": "t", "keyMethod": "key" }
   ],
   "fullKeyFunctions": [
     { "functionName": "translate" }
