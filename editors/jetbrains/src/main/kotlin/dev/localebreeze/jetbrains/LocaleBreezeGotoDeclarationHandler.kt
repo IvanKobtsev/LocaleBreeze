@@ -95,15 +95,17 @@ class LocaleBreezeGotoDeclarationHandler : GotoDeclarationHandler {
                 return arrayOf<PsiElement>(LocaleBreezeUsagesTarget(element, actualEditor, usages))
             }
 
-            // A recognized dictionary key with no usages has no definition
-            // targets. Returning an empty result makes LocaleBreeze authoritative
-            // and prevents WebStorm from navigating to unrelated JSON symbols.
+            // Keep an authoritative LocaleBreeze target even when there are no
+            // usages. An empty target array lets WebStorm ask its JavaScript/JSON
+            // handlers, which can contribute unrelated same-named symbols.
             if (
                 isDictionaryDeclaration &&
                 definitionTargets.isEmpty() &&
                 resolveKey(client, file, position) != null
             ) {
-                return emptyArray()
+                return arrayOf<PsiElement>(
+                    LocaleBreezeUsagesTarget(element, actualEditor, emptyList()),
+                )
             }
 
             mapTargets(client, externalDefinitionTargets).takeIf { it.isNotEmpty() }?.let {
@@ -223,7 +225,6 @@ private class LocaleBreezeUsagesTarget(
     override fun navigate(requestFocus: Boolean) {
         val declaration = declarationPointer.element ?: return
         val validUsages = usagePointers.mapNotNull(SmartPsiElementPointer<PsiElement>::getElement)
-        if (validUsages.isEmpty()) return
         if (validUsages.size == 1) {
             val usage = validUsages.single()
             val usageFile = usage.containingFile?.virtualFile ?: return
