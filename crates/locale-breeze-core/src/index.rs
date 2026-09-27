@@ -1435,6 +1435,46 @@ mod tests {
     }
 
     #[test]
+    fn ranks_direct_full_key_prefixes_above_scattered_character_matches() {
+        let uri = Url::parse("file:///translation.en.json").unwrap();
+        let text = r#"{"Page":{"Login":{"go_to_register":"Register","ordered":"Ordered","oreol":"Oreol"}}}"#.to_string();
+        let dictionaries = parse_dictionary(&uri, "en", &text, ".").unwrap();
+        let contribution = FileContribution {
+            uri: uri.clone(),
+            text,
+            version: None,
+            dictionaries,
+            occurrences: vec![],
+            ignored_occurrences: vec![],
+            bindings: vec![],
+        };
+        let snapshot = IndexSnapshot::rebuild(1, HashMap::from([(uri, Arc::new(contribution))]));
+
+        let (found, _) = snapshot.completions(
+            &CompletionContext::FullKey {
+                namespace: None,
+                query: "Page.Login.or".into(),
+            },
+            "en",
+            ".",
+            20,
+        );
+
+        assert_eq!(
+            found.first().map(|candidate| candidate.key.as_str()),
+            Some("Page.Login.oreol")
+        );
+        assert!(
+            found
+                .iter()
+                .position(|candidate| candidate.key == "Page.Login.oreol")
+                < found
+                    .iter()
+                    .position(|candidate| candidate.key == "Page.Login.go_to_register")
+        );
+    }
+
+    #[test]
     fn reports_only_unreferenced_default_locale_leaves_as_unused() {
         let dictionary_uri = Url::parse("file:///translation.en.json").unwrap();
         let dictionary_text = r#"{"used":"Used","unused":"Unused"}"#.to_string();

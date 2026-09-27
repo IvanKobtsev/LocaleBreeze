@@ -245,13 +245,6 @@ class LocaleBreezeConfigDiscovery(private val project: Project) {
   "dictionaries": "public/dictionaries/{locale}/{namespace}.json",
   "defaultLocale": "en",
   "defaultNamespace": "translation",
-  "keySeparator": ".",
-  "scopedFunctions": [
-    { "functionName": "useScopedTranslation", "translationMethod": "t", "keyMethod": "key" }
-  ],
-  "fullKeyFunctions": [
-    { "functionName": "translate" }
-  ],
   "translationKeyTypes": ["TranslationKey"],
   "translationKeyProps": ["transKey"],
   "ignoredScopes": ["Server_Errors"]

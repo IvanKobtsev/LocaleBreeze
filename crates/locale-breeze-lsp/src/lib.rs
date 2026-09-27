@@ -558,6 +558,13 @@ impl Server {
             &workspace.config().key_separator,
             100,
         );
+        let normalized_filter_query = filter_query.to_lowercase();
+        let has_prefix_match = candidates.iter().any(|candidate| {
+            candidate
+                .key
+                .to_lowercase()
+                .starts_with(&normalized_filter_query)
+        });
         let items = candidates
             .into_iter()
             .map(|candidate| CompletionItem {
@@ -567,7 +574,11 @@ impl Server {
                 },
                 kind: Some(CompletionItemKind::PROPERTY),
                 detail: Some(candidate.canonical_key),
-                filter_text: Some(completion_filter_text(&filter_query, &candidate.key)),
+                filter_text: Some(completion_filter_text(
+                    &filter_query,
+                    &candidate.key,
+                    !has_prefix_match,
+                )),
                 insert_text: Some(candidate.key),
                 // Keep LocaleBreeze's results ahead of suggestions whose sort text is
                 // derived from their label, while preserving relevance within our list.
@@ -1224,8 +1235,11 @@ fn parse<T: DeserializeOwned>(value: Value) -> Result<T> {
     Ok(serde_json::from_value(value)?)
 }
 
-fn completion_filter_text(query: &str, key: &str) -> String {
-    if query.is_empty() {
+fn completion_filter_text(query: &str, key: &str, allow_fuzzy_fallback: bool) -> String {
+    if query.is_empty()
+        || key.to_lowercase().starts_with(&query.to_lowercase())
+        || !allow_fuzzy_fallback
+    {
         key.to_owned()
     } else {
         format!("{query} {key}")
@@ -2272,10 +2286,18 @@ mod tests {
     #[test]
     fn completion_filter_text_keeps_fuzzy_canonical_matches_visible() {
         assert_eq!(
-            completion_filter_text("login", "Page.login"),
+            completion_filter_text("login", "Page.login", true),
             "login Page.login"
         );
-        assert_eq!(completion_filter_text("", "Page.login"), "Page.login");
+        assert_eq!(
+            completion_filter_text("Page.Log", "Page.Login", true),
+            "Page.Login"
+        );
+        assert_eq!(
+            completion_filter_text("login", "Page.login", false),
+            "Page.login"
+        );
+        assert_eq!(completion_filter_text("", "Page.login", true), "Page.login");
     }
 
     #[test]
