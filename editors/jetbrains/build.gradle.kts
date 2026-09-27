@@ -1,6 +1,7 @@
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
 import org.jetbrains.intellij.platform.gradle.tasks.PrepareSandboxTask
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.dsl.JvmDefaultMode
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
 plugins {
@@ -24,6 +25,7 @@ dependencies {
 
 tasks.withType<KotlinCompile>().configureEach {
     compilerOptions.jvmTarget = JvmTarget.JVM_25
+    compilerOptions.jvmDefault = JvmDefaultMode.NO_COMPATIBILITY
 }
 
 val repositoryRoot = rootProject.layout.projectDirectory.dir("../..")

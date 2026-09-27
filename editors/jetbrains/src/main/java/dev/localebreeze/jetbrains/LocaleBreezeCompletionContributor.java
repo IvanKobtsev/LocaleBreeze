@@ -55,8 +55,7 @@ public final class LocaleBreezeCompletionContributor extends CompletionContribut
             return false;
         }
 
-        return lookupElement.getObject().getLspClient().getProviderClass()
-            == LocaleBreezeLspIntegrationProvider.class;
+        return "locale-breeze".equals(lookupElement.getObject().getCompletionItem().getData());
     }
 
     static double priorityFromSortText(String sortText) {

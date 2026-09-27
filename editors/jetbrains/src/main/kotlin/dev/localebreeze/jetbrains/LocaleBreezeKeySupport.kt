@@ -157,7 +157,9 @@ class LocaleBreezeKeyCache(private val project: Project) {
                 }
                 values[file.url] = CachedKeys(stamp, payload.version, keys)
                 ApplicationManager.getApplication().invokeLater {
-                    if (!project.isDisposed) DaemonCodeAnalyzer.getInstance(project).restart()
+                    if (!project.isDisposed) {
+                        DaemonCodeAnalyzer.getInstance(project).restart("LocaleBreeze key data changed")
+                    }
                 }
             } finally {
                 pending.remove(file.url)

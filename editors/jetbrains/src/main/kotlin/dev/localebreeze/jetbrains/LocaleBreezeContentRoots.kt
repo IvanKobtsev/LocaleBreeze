@@ -1,9 +1,6 @@
 package dev.localebreeze.jetbrains
 
-import com.intellij.ide.actions.AttachDirectoryUtils
 import com.intellij.openapi.application.ApplicationManager
-import com.intellij.openapi.application.ReadAction
-import com.intellij.openapi.application.WriteIntentReadAction
 import com.intellij.openapi.components.PersistentStateComponent
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.State
@@ -40,12 +37,9 @@ class LocaleBreezeContentRoots(private val project: Project) : PersistentStateCo
     fun isAttached(path: Path): Boolean {
         val normalized = path.toAbsolutePath().normalize()
         val root = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(normalized) ?: return false
-        return ReadAction.compute<Boolean, RuntimeException> {
+        return ApplicationManager.getApplication().runReadAction<Boolean> {
             ProjectFileIndex.getInstance(project).isInContent(root) ||
                 ProjectRootManager.getInstance(project).contentRoots.any {
-                    VfsUtilCore.isAncestor(it, root, false)
-                } ||
-                AttachDirectoryUtils.getAttachedDirectories(project).any {
                     VfsUtilCore.isAncestor(it, root, false)
                 }
         }
@@ -55,7 +49,7 @@ class LocaleBreezeContentRoots(private val project: Project) : PersistentStateCo
         val normalized = path.toAbsolutePath().normalize()
         val root = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(normalized) ?: return false
         var moduleAvailable = false
-        WriteIntentReadAction.run {
+        ApplicationManager.getApplication().runWriteAction {
             val module = ModuleManager.getInstance(project).modules.firstOrNull()
             if (module != null) {
                 moduleAvailable = true
@@ -91,13 +85,17 @@ class LocaleBreezeContentRoots(private val project: Project) : PersistentStateCo
                 runCatching { Path.of(value) }.getOrNull()
                     ?.let { LocalFileSystem.getInstance().findFileByNioFile(it) }
             }
-            WriteIntentReadAction.run {
+            ApplicationManager.getApplication().runWriteAction {
                 val module = ModuleManager.getInstance(project).modules.firstOrNull()
                 if (module != null && staleRoots.isNotEmpty()) {
-                    AttachDirectoryUtils.addRemoveEntriesWithUndo(project, module, staleRoots, false)
+                    ModuleRootModificationUtil.updateModel(module) { model ->
+                        val staleUrls = staleRoots.mapTo(mutableSetOf()) { it.url }
+                        model.contentEntries
+                            .filter { it.url in staleUrls }
+                            .forEach(model::removeContentEntry)
+                    }
                 }
                 if (module != null && activeRoot != null) {
-                    AttachDirectoryUtils.addRemoveEntriesWithUndo(project, module, listOf(activeRoot), false)
                     ModuleRootModificationUtil.addContentRoot(module, activeRoot)
                     storedState.attachmentModelVersion = CURRENT_ATTACHMENT_MODEL_VERSION
                 }

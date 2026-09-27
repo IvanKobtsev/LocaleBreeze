@@ -195,7 +195,7 @@ class LocaleBreezeConfigDiscovery(private val project: Project) {
 
     private fun refreshEditorFeatures() {
         project.service<LocaleBreezeKeyCache>().invalidate()
-        DaemonCodeAnalyzer.getInstance(project).restart()
+        DaemonCodeAnalyzer.getInstance(project).restart("LocaleBreeze configuration changed")
     }
 
     private fun update(setup: LocaleBreezeConfigSetupState) {

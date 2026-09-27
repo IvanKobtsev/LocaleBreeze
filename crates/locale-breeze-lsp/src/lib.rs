@@ -586,6 +586,7 @@ impl Server {
                     "00000-{:05}",
                     10_000i64.saturating_sub(candidate.score)
                 )),
+                data: Some(Value::String("locale-breeze".to_owned())),
                 ..Default::default()
             })
             .collect();

@@ -510,7 +510,7 @@ private class LocaleBreezeToolWindowPanel(
                     configLocation = LocaleBreezeSettings.ConfigLocation.CUSTOM_PATH.name
                 }
             }
-        DaemonCodeAnalyzer.getInstance(project).restart()
+        DaemonCodeAnalyzer.getInstance(project).restart("LocaleBreeze settings changed")
         refresh()
     }
 
