@@ -66,10 +66,10 @@ jobs:
           name: locale-breeze-vscode-extensions
           path: dist/editors/*.vsix
           if-no-files-found: error
-      - name: Upload WebStorm extension
+      - name: Upload JetBrains extension
         uses: actions/upload-artifact@v4
         with:
-          name: locale-breeze-webstorm-extension
+          name: locale-breeze-jetbrains-extension
           path: dist/editors/*.zip
           if-no-files-found: error
 

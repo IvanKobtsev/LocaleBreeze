@@ -67,7 +67,7 @@ function packageJetBrains() {
   const wrapper = join(jetbrainsRoot, process.platform === 'win32' ? 'gradlew.bat' : 'gradlew');
   if (process.platform !== 'win32') chmodSync(wrapper, 0o755);
   run(wrapper, [
-    'buildPlugin', 'verifyPluginStructure', 'verifyBundledBinaries',
+    'buildPlugin', 'verifyPluginStructure', 'verifyPlugin', 'verifyBundledBinaries',
     '--rerun-tasks', '--no-configuration-cache',
   ], jetbrainsRoot);
   const version = readProperties(join(jetbrainsRoot, 'gradle.properties')).version;
