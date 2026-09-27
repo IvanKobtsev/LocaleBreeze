@@ -7,16 +7,23 @@ import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.wm.StatusBar
+import com.intellij.platform.lsp.api.LspClientManager
 import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.util.PsiTreeUtil
+import com.intellij.util.concurrency.AppExecutorUtil
 import java.awt.datatransfer.StringSelection
 import java.nio.file.Files
 import java.nio.file.Path
+import org.eclipse.lsp4j.ExecuteCommandParams
+import org.eclipse.lsp4j.Position
 
-class LocaleBreezeCopyFullKeyAction : AnAction() {
+open class LocaleBreezeCopyFullKeyAction(
+    private val includeNamespace: Boolean = false,
+) : AnAction() {
     override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.BGT
 
     override fun update(event: AnActionEvent) {
@@ -49,6 +56,58 @@ class LocaleBreezeCopyFullKeyAction : AnAction() {
             }
         }
         val key = segments.asReversed().joinToString(keySeparator(project))
+        if (!includeNamespace) {
+            copyKey(project, key)
+            return
+        }
+
+        val file = event.getData(CommonDataKeys.VIRTUAL_FILE) ?: return
+        val document = editor.document
+        val line = document.getLineNumber(offset)
+        val position = Position(line, offset - document.getLineStartOffset(line))
+        val clients = LspClientManager.getInstance(project)
+            .getClients(LocaleBreezeLspIntegrationProvider::class.java)
+            .filter { it.descriptor.isSupportedFile(file) }
+        if (clients.isEmpty()) {
+            StatusBar.Info.set("LocaleBreeze: The language server is not running", project)
+            return
+        }
+
+        AppExecutorUtil.getAppExecutorService().execute {
+            val qualifiedKey: String? = clients.firstNotNullOfOrNull { client ->
+                runCatching {
+                    client.sendRequestSync(2_000) { server ->
+                        server.workspaceService.executeCommand(
+                            ExecuteCommandParams(
+                                "localeBreeze.resolveFullKey",
+                                listOf(
+                                    mapOf(
+                                        "textDocument" to mapOf(
+                                            "uri" to client.getDocumentIdentifier(file).uri,
+                                        ),
+                                        "position" to mapOf(
+                                            "line" to position.line,
+                                            "character" to position.character,
+                                        ),
+                                    ),
+                                ),
+                            ),
+                        )
+                    } as? String
+                }.getOrNull()
+            }
+            ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed) return@invokeLater
+                if (qualifiedKey == null) {
+                    StatusBar.Info.set("LocaleBreeze: Could not resolve the translation namespace", project)
+                } else {
+                    copyKey(project, qualifiedKey)
+                }
+            }
+        }
+    }
+
+    private fun copyKey(project: Project, key: String) {
         CopyPasteManager.getInstance().setContents(StringSelection(key))
         StatusBar.Info.set("LocaleBreeze: Copied $key", project)
     }
@@ -73,3 +132,5 @@ class LocaleBreezeCopyFullKeyAction : AnAction() {
         }.getOrNull() ?: "."
     }
 }
+
+class LocaleBreezeCopyFullKeyWithNamespaceAction : LocaleBreezeCopyFullKeyAction(includeNamespace = true)

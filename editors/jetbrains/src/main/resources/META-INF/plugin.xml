@@ -47,6 +47,13 @@
       <add-to-group group-id="EditorPopupMenu" anchor="last"/>
     </action>
     <action
+        id="dev.localebreeze.jetbrains.CopyFullKeyWithNamespace"
+        class="dev.localebreeze.jetbrains.LocaleBreezeCopyFullKeyWithNamespaceAction"
+        text="Copy Full Translation Key with Namespace"
+        description="Copy the full LocaleBreeze translation key path prefixed by its namespace">
+      <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+    </action>
+    <action
         id="dev.localebreeze.jetbrains.AddTranslationKey"
         class="dev.localebreeze.jetbrains.LocaleBreezeAddKeyAction"
         text="Add Translation Key…"

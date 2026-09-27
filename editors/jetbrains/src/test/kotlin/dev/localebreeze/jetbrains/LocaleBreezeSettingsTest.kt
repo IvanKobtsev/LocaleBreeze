@@ -120,4 +120,13 @@ class LocaleBreezeSettingsTest {
         assertFalse(nextProjectHealthViewState(current = true, available = true))
         assertFalse(nextProjectHealthViewState(current = false, available = false))
     }
+
+    @Test
+    fun `completion priority preserves language server relevance`() {
+        val directPrefix = LocaleBreezeCompletionContributor.priorityFromSortText("00000-01018")
+        val scatteredMatch = LocaleBreezeCompletionContributor.priorityFromSortText("00000-05000")
+
+        assertTrue(directPrefix > scatteredMatch)
+        assertEquals(0.0, LocaleBreezeCompletionContributor.priorityFromSortText("invalid"))
+    }
 }
