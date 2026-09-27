@@ -40,6 +40,8 @@ import javax.swing.JComboBox
 import javax.swing.JComponent
 import javax.swing.JPanel
 import javax.swing.JProgressBar
+import javax.swing.JMenuItem
+import javax.swing.JPopupMenu
 import javax.swing.JSeparator
 import javax.swing.Scrollable
 import javax.swing.SwingUtilities
@@ -342,7 +344,7 @@ private class LocaleBreezeToolWindowPanel(
     private fun toolBar(state: LocaleBreezeDashboardState): JComponent = JPanel(BorderLayout()).apply {
         val lifecycle = state.lifecycle
         val enabledInSettings = LocaleBreezeSettings.getInstance(project).isEnabledInSettings()
-        val dictionaryPath = state.status?.defaultDictionaryPath
+        val dictionaries = state.status?.availableDictionaries().orEmpty()
         val configPath = when (val setup = state.setup) {
             is LocaleBreezeConfigSetupState.Configured -> setup.path
             is LocaleBreezeConfigSetupState.RootConfig -> setup.path
@@ -351,10 +353,16 @@ private class LocaleBreezeToolWindowPanel(
         alignmentX = Component.LEFT_ALIGNMENT
         maximumSize = Dimension(Int.MAX_VALUE, JBUI.scale(30))
         isOpaque = false
+        val openDictionaryButton = iconButton(
+            openDictionaryIcon,
+            "Open dictionary",
+            dictionaries.isNotEmpty(),
+        )
+        openDictionaryButton.addActionListener {
+            openDictionary(dictionaries, openDictionaryButton)
+        }
         add(toolBarRow(
-            iconButton(openDictionaryIcon, "Open dictionary", dictionaryPath != null) {
-                dictionaryPath?.let(::openPath)
-            },
+            openDictionaryButton,
             iconButton(configFileIcon, "Open workspace config", configPath != null) {
                 configPath?.let(::openPath)
             },
@@ -368,6 +376,38 @@ private class LocaleBreezeToolWindowPanel(
                 setPluginEnabled(!enabledInSettings)
             },
         ), BorderLayout.EAST)
+    }
+
+    private fun LocaleBreezeWorkspaceStatus.availableDictionaries(): List<LocaleBreezeWorkspaceDictionary> =
+        defaultDictionaries
+            .filter { it.path.isNotBlank() }
+            .ifEmpty {
+                defaultDictionaryPath
+                    ?.takeIf(String::isNotBlank)
+                    ?.let { listOf(LocaleBreezeWorkspaceDictionary(path = it)) }
+                    .orEmpty()
+            }
+
+    private fun openDictionary(
+        dictionaries: List<LocaleBreezeWorkspaceDictionary>,
+        anchor: JComponent,
+    ) {
+        if (dictionaries.size == 1) {
+            openPath(dictionaries.single().path)
+            return
+        }
+        if (dictionaries.isEmpty()) return
+        JPopupMenu().apply {
+            dictionaries
+                .sortedWith(compareBy({ it.namespace.orEmpty() }, { it.path }))
+                .forEach { dictionary ->
+                    add(JMenuItem(dictionary.namespace ?: "Default namespace").apply {
+                        toolTipText = dictionary.path
+                        addActionListener { openPath(dictionary.path) }
+                    })
+                }
+            show(anchor, 0, anchor.height)
+        }
     }
 
     private fun refresh() {

@@ -33,11 +33,17 @@ data class LocaleBreezeWorkspaceStatus(
     val configPath: String = "",
     val defaultLocale: String = "",
     val defaultDictionaryPath: String? = null,
+    val defaultDictionaries: List<LocaleBreezeWorkspaceDictionary> = emptyList(),
     val dictionaryRootPath: String = "",
     val dictionaryFileCount: Int = 0,
     val totalKeyCount: Int = 0,
     val unusedKeyCount: Int = 0,
     val generation: Long = 0,
+)
+
+data class LocaleBreezeWorkspaceDictionary(
+    val namespace: String? = null,
+    val path: String = "",
 )
 
 enum class LocaleBreezeLifecycle { DISABLED, WAITING, STARTING, READY, UNAVAILABLE }
