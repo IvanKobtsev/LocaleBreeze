@@ -130,11 +130,19 @@ struct WorkspaceStatus {
     config_path: String,
     default_locale: String,
     default_dictionary_path: Option<String>,
+    default_dictionaries: Vec<WorkspaceDictionary>,
     dictionary_root_path: String,
     dictionary_file_count: usize,
     total_key_count: usize,
     unused_key_count: usize,
     generation: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceDictionary {
+    namespace: Option<String>,
+    path: String,
 }
 
 impl Server {
@@ -1690,6 +1698,19 @@ impl WorkspaceStatus {
                     && identity.namespace == workspace.config().default_namespace
             })
             .map(|(_, path)| path.display().to_string());
+        let mut default_dictionaries = dictionary_paths
+            .iter()
+            .filter(|(identity, _)| identity.locale == workspace.config().default_locale)
+            .map(|(identity, path)| WorkspaceDictionary {
+                namespace: identity.namespace.clone(),
+                path: path.display().to_string(),
+            })
+            .collect::<Vec<_>>();
+        default_dictionaries.sort_by(|left, right| {
+            left.namespace
+                .cmp(&right.namespace)
+                .then(left.path.cmp(&right.path))
+        });
 
         let mut seen_keys = HashSet::new();
         let mut unused_key_count = 0;
@@ -1707,6 +1728,7 @@ impl WorkspaceStatus {
             config_path: config_path.display().to_string(),
             default_locale: workspace.config().default_locale.clone(),
             default_dictionary_path,
+            default_dictionaries,
             dictionary_root_path: workspace.dictionary_root().display().to_string(),
             dictionary_file_count: dictionary_paths.len(),
             total_key_count: seen_keys.len(),
@@ -2228,7 +2250,60 @@ mod tests {
             status.default_dictionary_path,
             Some(default_dictionary.display().to_string())
         );
+        assert_eq!(status.default_dictionaries.len(), 1);
+        assert_eq!(status.default_dictionaries[0].namespace, None);
+        assert_eq!(
+            status.default_dictionaries[0].path,
+            default_dictionary.display().to_string()
+        );
         assert!(status.generation > 0);
+    }
+
+    #[test]
+    fn workspace_status_lists_default_locale_dictionaries_by_namespace() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("locale-breeze.json");
+        std::fs::write(
+            &config_path,
+            r#"{
+              "dictionaries":"{locale}/{namespace}.json",
+              "defaultLocale":"en",
+              "defaultNamespace":"common",
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "fullKeyFunctions":[{"functionName":"translate"}]
+            }"#,
+        )
+        .unwrap();
+        std::fs::create_dir(temp.path().join("en")).unwrap();
+        std::fs::create_dir(temp.path().join("fr")).unwrap();
+        let common = temp.path().join("en").join("common.json");
+        let home = temp.path().join("en").join("home.json");
+        std::fs::write(&common, r#"{"title":"Common"}"#).unwrap();
+        std::fs::write(&home, r#"{"title":"Home"}"#).unwrap();
+        std::fs::write(
+            temp.path().join("fr").join("common.json"),
+            r#"{"title":"Commun"}"#,
+        )
+        .unwrap();
+
+        let workspace = WorkspaceIndex::load(temp.path().to_owned(), &config_path).unwrap();
+        let status = WorkspaceStatus::from_workspace(&workspace, &config_path);
+
+        assert_eq!(
+            status.default_dictionary_path,
+            Some(common.display().to_string())
+        );
+        assert_eq!(
+            status
+                .default_dictionaries
+                .iter()
+                .map(|dictionary| (dictionary.namespace.as_deref(), dictionary.path.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (Some("common"), common.to_str().unwrap()),
+                (Some("home"), home.to_str().unwrap()),
+            ]
+        );
     }
 
     #[cfg(windows)]
