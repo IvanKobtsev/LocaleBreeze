@@ -1426,6 +1426,27 @@ fn diagnostic_notifications(
                 });
         }
     }
+    for entry in snapshot.default_locale_scope_entries(&workspace.config().default_locale) {
+        if workspace.preferences().show_unused_keys
+            && !snapshot.is_scope_entry_used(entry, &workspace.config().key_separator)
+            && let Some(range) = location(&snapshot, &entry.uri, &entry.key_range).map(|l| l.range)
+        {
+            by_uri
+                .entry(entry.uri.clone())
+                .or_default()
+                .push(Diagnostic {
+                    range,
+                    severity: Some(DiagnosticSeverity::WARNING),
+                    code: None,
+                    code_description: None,
+                    source: Some("locale-breeze".into()),
+                    message: format!("Translation scope \"{}\" seems unused", entry.key),
+                    related_information: None,
+                    tags: Some(vec![DiagnosticTag::UNNECESSARY]),
+                    data: None,
+                });
+        }
+    }
     let mut cache = published
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2307,6 +2328,53 @@ mod tests {
             serde_json::from_value(refreshed[0].params.clone()).unwrap();
         assert_eq!(refreshed_params.diagnostics.len(), 1);
         assert_eq!(refreshed_params.diagnostics[0].range.start.line, 2);
+    }
+
+    #[test]
+    fn publishes_unnecessary_diagnostics_for_unused_scopes() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("locale-breeze.json"),
+            r#"{
+              "dictionaries":"translation.{locale}.json",
+              "defaultLocale":"en",
+              "keySeparator":".",
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethods":["t"]}],
+              "fullKeyFunctions":[{"functionName":"translate"}]
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("translation.en.json"),
+            r#"{"Used":{"value":"Used"},"Unused":{"value":"Unused"}}"#,
+        )
+        .unwrap();
+        std::fs::write(temp.path().join("app.ts"), "i18next.t('Used.value')").unwrap();
+        let workspace = WorkspaceIndex::load(
+            temp.path().to_owned(),
+            &temp.path().join("locale-breeze.json"),
+        )
+        .unwrap();
+        let notifications = diagnostic_notifications(&workspace, &Mutex::new(HashMap::new()));
+        let dictionary_uri = Url::from_file_path(temp.path().join("translation.en.json")).unwrap();
+        let params = notifications
+            .into_iter()
+            .map(|notification| {
+                serde_json::from_value::<PublishDiagnosticsParams>(notification.params).unwrap()
+            })
+            .find(|params| params.uri == dictionary_uri)
+            .unwrap();
+        assert_eq!(params.diagnostics.len(), 2);
+        assert!(params.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message == "Translation scope \"Unused\" seems unused"
+                && diagnostic.tags == Some(vec![DiagnosticTag::UNNECESSARY])
+        }));
+        assert!(
+            params
+                .diagnostics
+                .iter()
+                .all(|diagnostic| !diagnostic.message.contains("Used\" seems unused"))
+        );
     }
 
     #[test]

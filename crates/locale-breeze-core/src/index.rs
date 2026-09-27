@@ -204,6 +204,16 @@ impl IndexSnapshot {
             .filter(move |entry| entry.locale == default_locale && entry.kind == EntryKind::Leaf)
     }
 
+    pub fn default_locale_scope_entries<'a>(
+        &'a self,
+        default_locale: &'a str,
+    ) -> impl Iterator<Item = &'a DictionaryEntry> + 'a {
+        self.dictionaries
+            .values()
+            .flatten()
+            .filter(move |entry| entry.locale == default_locale && entry.kind == EntryKind::Object)
+    }
+
     pub fn is_leaf_key_used(&self, key: &CanonicalKey) -> bool {
         self.occurrences(None, key)
             .iter()
@@ -242,6 +252,24 @@ impl IndexSnapshot {
                 .dynamic_scope_occurrences(entry.namespace.as_deref(), &entry.key, separator)
                 .next()
                 .is_some()
+    }
+
+    pub fn is_scope_entry_used(&self, entry: &DictionaryEntry, separator: &str) -> bool {
+        let descendant_prefix = format!("{}{}", entry.key, separator);
+        self.occurrences.values().flatten().any(|occurrence| {
+            if occurrence.namespace != entry.namespace
+                || occurrence.kind == OccurrenceKind::NamespaceDeclaration
+            {
+                return false;
+            }
+            occurrence.key == entry.key
+                || occurrence.key.as_str().starts_with(&descendant_prefix)
+                || occurrence.kind == OccurrenceKind::DynamicScope
+                    && entry
+                        .key
+                        .as_str()
+                        .starts_with(&format!("{}{}", occurrence.key, separator))
+        })
     }
 
     pub fn occurrences_resolving_to<'a>(
@@ -1342,6 +1370,76 @@ mod tests {
             .map(|entry| (entry.key.as_str(), snapshot.is_leaf_key_used(&entry.key)))
             .collect::<Vec<_>>();
         assert_eq!(leaves, vec![("unused", false), ("used", true)]);
+    }
+
+    #[test]
+    fn marks_scopes_used_by_direct_descendant_and_dynamic_usages() {
+        let dictionary_uri = Url::parse("file:///translation.en.json").unwrap();
+        let dictionary_text = r#"{
+            "Used":{"Nested":{"value":"Value"}},
+            "Declared":{"value":"Value"},
+            "Dynamic":{"Child":{"value":"Value"}},
+            "Unused":{"Child":{"value":"Value"}}
+        }"#
+        .to_string();
+        let dictionary = FileContribution {
+            uri: dictionary_uri.clone(),
+            dictionaries: parse_dictionary(&dictionary_uri, "en", &dictionary_text, ".").unwrap(),
+            text: dictionary_text,
+            version: None,
+            occurrences: vec![],
+            ignored_occurrences: vec![],
+            bindings: vec![],
+        };
+        let source_uri = Url::parse("file:///app.ts").unwrap();
+        let source_text = concat!(
+            "i18next.t('Used.Nested.value');",
+            "useScopedTranslation('Declared');",
+            "i18next.t(`Dynamic.${value}`);"
+        )
+        .to_string();
+        let (occurrences, bindings) = analyze_source(
+            &source_uri,
+            &source_text,
+            ".",
+            &["useScopedTranslation".into()],
+            &["t".into()],
+            &["i18next.t".into()],
+            &[],
+            &[],
+        );
+        let source = FileContribution {
+            uri: source_uri.clone(),
+            text: source_text,
+            version: None,
+            dictionaries: vec![],
+            occurrences,
+            ignored_occurrences: vec![],
+            bindings,
+        };
+        let snapshot = IndexSnapshot::rebuild(
+            1,
+            HashMap::from([
+                (dictionary_uri, Arc::new(dictionary)),
+                (source_uri, Arc::new(source)),
+            ]),
+        );
+        let scopes = snapshot
+            .default_locale_scope_entries("en")
+            .map(|entry| (entry.key.as_str(), snapshot.is_scope_entry_used(entry, ".")))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            scopes,
+            [
+                ("Declared", true),
+                ("Dynamic", true),
+                ("Dynamic.Child", true),
+                ("Unused", false),
+                ("Unused.Child", false),
+                ("Used", true),
+                ("Used.Nested", true),
+            ]
+        );
     }
 
     #[test]
