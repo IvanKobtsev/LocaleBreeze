@@ -48,6 +48,7 @@ pub struct ScopeBinding {
     pub is_translation_method: bool,
     pub scope: Option<CanonicalKey>,
     pub namespace: Option<String>,
+    pub allows_namespace_override: bool,
     pub declaration_range: ByteRange,
     pub visibility: ByteRange,
     pub direct_function: bool,
@@ -183,8 +184,12 @@ fn collect_bindings(
                     .filter(|function| function.function_name == callee)
                     .collect::<Vec<_>>();
                 if let Some(function) = matching_functions.first() {
-                    if let Some(scope) =
-                        literal_value(literal, text).and_then(|s| CanonicalKey::new(s, separator))
+                    if let Some(value) = literal_value(literal, text)
+                        && let Some((namespace, scope)) = scoped_scope(
+                            &value,
+                            separator,
+                            function.default_namespace.as_deref().or(default_namespace),
+                        )
                     {
                         let visibility_end = lexical_container(node).end_byte();
                         let visibility = ByteRange(node.end_byte()..visibility_end);
@@ -200,11 +205,8 @@ fn collect_bindings(
                                         method: method.into(),
                                         is_translation_method,
                                         scope: Some(scope.clone()),
-                                        namespace: function
-                                            .default_namespace
-                                            .as_deref()
-                                            .or(default_namespace)
-                                            .map(str::to_owned),
+                                        namespace: namespace.clone(),
+                                        allows_namespace_override: false,
                                         declaration_range: declaration_range.clone(),
                                         visibility: visibility.clone(),
                                         direct_function: false,
@@ -242,11 +244,8 @@ fn collect_bindings(
                                         method: property.into(),
                                         is_translation_method,
                                         scope: Some(scope.clone()),
-                                        namespace: function
-                                            .default_namespace
-                                            .as_deref()
-                                            .or(default_namespace)
-                                            .map(str::to_owned),
+                                        namespace: namespace.clone(),
+                                        allows_namespace_override: false,
                                         declaration_range: declaration_range.clone(),
                                         visibility: visibility.clone(),
                                         direct_function: true,
@@ -350,16 +349,16 @@ fn collect_calls(
                     .iter()
                     .find(|function| function.function_name == callee)
                 {
-                    if let Some(key) = CanonicalKey::new(value, separator) {
+                    if let Some((namespace, key)) = scoped_scope(
+                        &value,
+                        separator,
+                        function.default_namespace.as_deref().or(default_namespace),
+                    ) {
                         out.push(SourceOccurrence {
                             uri: uri.clone(),
                             range,
                             key,
-                            namespace: function
-                                .default_namespace
-                                .as_deref()
-                                .or(default_namespace)
-                                .map(str::to_owned),
+                            namespace,
                             kind: OccurrenceKind::ScopeDeclaration,
                             scope: None,
                             relative_key: None,
@@ -414,18 +413,24 @@ fn collect_calls(
                     }
                 } else if let Some(binding) = resolve_binding(&callee, node.start_byte(), bindings)
                 {
-                    let explicit = split_namespace_key(&value, separator);
+                    let explicit = binding
+                        .allows_namespace_override
+                        .then(|| split_namespace_key(&value, separator))
+                        .flatten();
                     let namespace = explicit
                         .as_ref()
-                        .map(|x| x.0.clone())
+                        .map(|(namespace, _)| namespace.clone())
                         .or_else(|| binding.namespace.clone());
-                    let relative = explicit.as_ref().map_or(value.as_str(), |x| x.1.as_str());
-                    let key = binding
-                        .scope
+                    let relative = explicit
                         .as_ref()
-                        .and_then(|scope| CanonicalKey::join(scope, relative, separator))
-                        .or_else(|| CanonicalKey::new(relative, separator));
-                    if let Some(key) = key {
+                        .map_or(value.as_str(), |(_, key)| key.as_str());
+                    if (!value.contains(':') || explicit.is_some())
+                        && let Some(key) = binding
+                            .scope
+                            .as_ref()
+                            .and_then(|scope| CanonicalKey::join(scope, relative, separator))
+                            .or_else(|| CanonicalKey::new(relative, separator))
+                    {
                         out.push(SourceOccurrence {
                             uri: uri.clone(),
                             range,
@@ -536,6 +541,7 @@ fn push_bindings(
                     is_translation_method: true,
                     scope: scope.clone(),
                     namespace: Some(namespace.clone()),
+                    allows_namespace_override: true,
                     declaration_range: declaration_range.clone(),
                     visibility: visibility.clone(),
                     direct_function: false,
@@ -570,6 +576,7 @@ fn push_bindings(
                     is_translation_method: true,
                     scope: scope.clone(),
                     namespace: Some(namespace.clone()),
+                    allows_namespace_override: true,
                     declaration_range: declaration_range.clone(),
                     visibility: visibility.clone(),
                     direct_function: true,
@@ -689,6 +696,19 @@ fn split_namespace_key(value: &str, separator: &str) -> Option<(String, Canonica
         return None;
     }
     Some((namespace.to_owned(), CanonicalKey::new(key, separator)?))
+}
+
+fn scoped_scope(
+    value: &str,
+    separator: &str,
+    default_namespace: Option<&str>,
+) -> Option<(Option<String>, CanonicalKey)> {
+    split_namespace_key(value, separator)
+        .map(|(namespace, key)| (Some(namespace), key))
+        .or_else(|| {
+            CanonicalKey::new(value, separator)
+                .map(|key| (default_namespace.map(str::to_owned), key))
+        })
 }
 
 fn call_with_first_argument<'a>(node: Node<'a>, text: &str) -> Option<(String, Node<'a>)> {
@@ -1005,6 +1025,9 @@ mod tests {
           const a = useAlpha('Page');
           a.t('title', { name });
           a.key('lookup', { count: 2, extra: true });
+          a.t('other:unsupported');
+          const scoped = useAlpha('other:Page.Products');
+          scoped.t('title');
           const { key: getKey } = useBeta('Card');
           getKey('label', { count: 2 });
           const none = useNone('Empty');
@@ -1053,6 +1076,14 @@ mod tests {
                 && binding.is_translation_method
                 && binding.namespace.as_deref() == Some("alpha")
         }));
+        assert!(bindings.iter().any(|binding| {
+            binding.name == "scoped"
+                && binding.namespace.as_deref() == Some("other")
+                && binding
+                    .scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.as_str() == "Page.Products")
+        }));
         assert!(!bindings.iter().any(|binding| binding.name == "none"));
         assert!(bindings.iter().any(|binding| {
             binding.name == "a"
@@ -1078,6 +1109,21 @@ mod tests {
             occurrence.namespace.as_deref() == Some("alpha")
                 && occurrence.key.as_str() == "Page.lookup"
                 && occurrence.arguments.is_none()
+        }));
+        assert!(
+            !found
+                .iter()
+                .any(|occurrence| { occurrence.key.as_str().contains("unsupported") })
+        );
+        assert!(found.iter().any(|occurrence| {
+            occurrence.kind == OccurrenceKind::ScopeDeclaration
+                && occurrence.namespace.as_deref() == Some("other")
+                && occurrence.key.as_str() == "Page.Products"
+        }));
+        assert!(found.iter().any(|occurrence| {
+            occurrence.kind == OccurrenceKind::ScopedKey
+                && occurrence.namespace.as_deref() == Some("other")
+                && occurrence.key.as_str() == "Page.Products.title"
         }));
         assert!(found.iter().any(|occurrence| {
             occurrence.namespace.as_deref() == Some("global")

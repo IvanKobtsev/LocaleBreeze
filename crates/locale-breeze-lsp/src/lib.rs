@@ -608,10 +608,29 @@ impl Server {
         let Some(offset) = position_offset(&snapshot, &uri, position) else {
             return Ok(None);
         };
-        let Some(key) =
-            key_at_position(&snapshot, &uri, position, &workspace.config().key_separator)
+        let Some(target) =
+            source_target_at_position(&snapshot, &uri, position, &workspace.config().key_separator)
         else {
             return Ok(None);
+        };
+        if let SourcePositionTarget::Namespace(namespace) = target {
+            let locations = snapshot
+                .dictionary_entries_all()
+                .filter(|entry| {
+                    entry.namespace.as_deref() == Some(namespace.as_str())
+                        && entry.locale == workspace.config().default_locale
+                })
+                .take(1)
+                .filter_map(|entry| location(&snapshot, &entry.uri, &entry.key_range))
+                .collect::<Vec<_>>();
+            return Ok((!locations.is_empty()).then_some(GotoDefinitionResponse::Array(locations)));
+        }
+        let SourcePositionTarget::Key {
+            qualified: key,
+            complete,
+        } = target
+        else {
+            unreachable!();
         };
         if snapshot
             .occurrence_at(&uri, offset)
@@ -662,6 +681,9 @@ impl Server {
         } else {
             let entries = snapshot
                 .occurrence_at(&uri, offset)
+                .filter(|occurrence| {
+                    complete && snapshot.occurrence_resolves_to_plural_family(occurrence)
+                })
                 .map(|occurrence| {
                     snapshot
                         .resolved_dictionary_entries(occurrence, &workspace.config().key_separator)
@@ -1258,43 +1280,86 @@ fn position_offset(snapshot: &IndexSnapshot, uri: &Url, position: Position) -> O
     LineIndex::new(text).offset(text, position.line, position.character)
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SourcePositionTarget {
+    Namespace(String),
+    Key {
+        qualified: QualifiedKey,
+        complete: bool,
+    },
+}
+
+fn source_target_at_position(
+    snapshot: &IndexSnapshot,
+    uri: &Url,
+    position: Position,
+    separator: &str,
+) -> Option<SourcePositionTarget> {
+    let offset = position_offset(snapshot, uri, position)?;
+    if let Some(occurrence) = snapshot.occurrence_at(uri, offset) {
+        let text = snapshot.text(uri)?;
+        let literal = text.get(occurrence.range.0.clone())?;
+        let cursor = offset
+            .saturating_sub(occurrence.range.0.start)
+            .min(literal.len());
+        let explicit_namespace = literal.split_once(':').and_then(|(namespace, relative)| {
+            (occurrence.namespace.as_deref() == Some(namespace)
+                && occurrence
+                    .relative_key
+                    .as_deref()
+                    .is_none_or(|key| key == relative))
+            .then_some((namespace, relative))
+        });
+        if let Some((namespace, _)) = explicit_namespace
+            && cursor <= namespace.len()
+        {
+            return Some(SourcePositionTarget::Namespace(namespace.to_owned()));
+        }
+
+        let literal_key = explicit_namespace.map_or(literal, |(_, relative)| relative);
+        let key_cursor = explicit_namespace
+            .map(|(namespace, _)| cursor.saturating_sub(namespace.len() + 1))
+            .unwrap_or(cursor)
+            .min(literal_key.len());
+        let segment_index = literal_key.get(..key_cursor)?.matches(separator).count();
+        let (scope, key) = match (&occurrence.scope, &occurrence.relative_key) {
+            (Some(scope), Some(relative)) => (Some(scope), relative.as_str()),
+            _ => (None, occurrence.key.as_str()),
+        };
+        let segment_count = key.split(separator).count();
+        let prefix = key
+            .split(separator)
+            .take(segment_index + 1)
+            .collect::<Vec<_>>()
+            .join(separator);
+        let key = match scope {
+            Some(scope) => CanonicalKey::join(scope, &prefix, separator),
+            None => CanonicalKey::new(prefix, separator),
+        }?;
+        return Some(SourcePositionTarget::Key {
+            qualified: QualifiedKey::new(occurrence.namespace.clone(), key),
+            complete: segment_index + 1 >= segment_count,
+        });
+    }
+
+    snapshot
+        .dictionary_at(uri, offset)
+        .map(|entry| SourcePositionTarget::Key {
+            qualified: QualifiedKey::new(entry.namespace.clone(), entry.key.clone()),
+            complete: true,
+        })
+}
+
 fn key_at_position(
     snapshot: &IndexSnapshot,
     uri: &Url,
     position: Position,
     separator: &str,
 ) -> Option<QualifiedKey> {
-    let offset = position_offset(snapshot, uri, position)?;
-    snapshot
-        .occurrence_at(uri, offset)
-        .and_then(|occurrence| {
-            let text = snapshot.text(uri)?;
-            let literal = text.get(occurrence.range.0.clone())?;
-            let cursor = offset
-                .saturating_sub(occurrence.range.0.start)
-                .min(literal.len());
-            let segment_index = literal.get(..cursor)?.matches(separator).count();
-
-            let (scope, key) = match (&occurrence.scope, &occurrence.relative_key) {
-                (Some(scope), Some(relative)) => (Some(scope), relative.as_str()),
-                _ => (None, occurrence.key.as_str()),
-            };
-            let prefix = key
-                .split(separator)
-                .take(segment_index + 1)
-                .collect::<Vec<_>>()
-                .join(separator);
-            let key = match scope {
-                Some(scope) => CanonicalKey::join(scope, &prefix, separator),
-                None => CanonicalKey::new(prefix, separator),
-            }?;
-            Some(QualifiedKey::new(occurrence.namespace.clone(), key))
-        })
-        .or_else(|| {
-            snapshot
-                .dictionary_at(uri, offset)
-                .map(|e| QualifiedKey::new(e.namespace.clone(), e.key.clone()))
-        })
+    match source_target_at_position(snapshot, uri, position, separator)? {
+        SourcePositionTarget::Namespace(_) => None,
+        SourcePositionTarget::Key { qualified, .. } => Some(qualified),
+    }
 }
 
 fn location(snapshot: &IndexSnapshot, uri: &Url, range: &ByteRange) -> Option<Location> {
@@ -1482,10 +1547,7 @@ fn diagnostic_notifications(
 ) -> Vec<Notification> {
     let snapshot = workspace.snapshot();
     let mut by_uri: HashMap<Url, Vec<Diagnostic>> = HashMap::new();
-    for finding in analysis_findings(workspace, &snapshot)
-        .into_iter()
-        .filter(|finding| finding.kind != AnalysisFindingKind::MissingTranslationKey)
-    {
+    for finding in analysis_findings(workspace, &snapshot) {
         if let Some(range) = location(&snapshot, &finding.uri, &finding.range).map(|l| l.range) {
             by_uri.entry(finding.uri).or_default().push(Diagnostic {
                 range,
@@ -2167,10 +2229,18 @@ mod tests {
             })
             .find(|params| params.uri == source_uri)
             .unwrap();
-        assert_eq!(diagnostic_params.diagnostics.len(), 2);
-        assert!(diagnostic_params.diagnostics.iter().all(|diagnostic| {
-            diagnostic.code != Some(NumberOrString::String("missing-translation-key".into()))
-        }));
+        assert_eq!(diagnostic_params.diagnostics.len(), 6);
+        assert_eq!(
+            diagnostic_params
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| {
+                    diagnostic.code
+                        == Some(NumberOrString::String("missing-translation-key".into()))
+                })
+                .count(),
+            4
+        );
 
         let server = Server {
             workspaces: vec![workspace],
@@ -2994,6 +3064,163 @@ mod tests {
         let character = source.find("FieldNames").unwrap() as u32 + 2;
         let resolved = key_at_position(&snapshot, &uri, Position::new(0, character), ".").unwrap();
         assert_eq!(resolved.key.as_str(), "Page.Steps.FieldNames");
+    }
+
+    #[test]
+    fn scoped_navigation_respects_clicked_segments_and_explicit_namespaces() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("locale-breeze.json"),
+            r#"{
+              "dictionaries":"locales/{locale}/{namespace}.json",
+              "defaultLocale":"en",
+              "defaultNamespace":"common",
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod":"t"}]
+            }"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(temp.path().join("locales/en")).unwrap();
+        let common_path = temp.path().join("locales/en/common.json");
+        let other_path = temp.path().join("locales/en/other.json");
+        let dictionary =
+            "{\n  \"Page\": {\n    \"section\": {\n      \"title\": \"Title\"\n    }\n  }\n}";
+        std::fs::write(&common_path, dictionary).unwrap();
+        std::fs::write(&other_path, dictionary).unwrap();
+        let source_path = temp.path().join("app.ts");
+        let source = concat!(
+            "const i18n=useScopedTranslation('Page');\n",
+            "i18n.t('section.title');\n",
+            "i18n.t('other:section.title');\n",
+            "i18n.t('missing.key');\n",
+            "const namespaced=useScopedTranslation('other:Page.section');\n",
+            "namespaced.t('title');\n",
+            "const unknown=useScopedTranslation('unknown:Page.section');"
+        );
+        std::fs::write(&source_path, source).unwrap();
+        let workspace = Arc::new(
+            WorkspaceIndex::load_with_preferences(
+                temp.path().to_owned(),
+                &temp.path().join("locale-breeze.json"),
+                WorkspacePreferences {
+                    show_unused_keys: false,
+                },
+            )
+            .unwrap(),
+        );
+        let uri = Url::from_file_path(source_path).unwrap();
+        let server = Server {
+            workspaces: vec![workspace.clone()],
+            workspace_roots: HashSet::new(),
+            watchers: vec![],
+            config_override: None,
+            preferences: WorkspacePreferences::default(),
+            published_diagnostics: Default::default(),
+        };
+        let definition_at = |line, character| {
+            let definition = server
+                .definition(GotoDefinitionParams {
+                    text_document_position_params: TextDocumentPositionParams::new(
+                        TextDocumentIdentifier::new(uri.clone()),
+                        Position::new(line, character),
+                    ),
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                })
+                .unwrap()?;
+            let GotoDefinitionResponse::Array(mut locations) = definition else {
+                panic!("expected definition locations");
+            };
+            locations.pop()
+        };
+
+        let section = definition_at(1, 11).unwrap();
+        assert_eq!(section.uri, Url::from_file_path(&common_path).unwrap());
+        assert_eq!(section.range.start.line, 2);
+        let title = definition_at(1, 19).unwrap();
+        assert_eq!(title.uri, Url::from_file_path(&common_path).unwrap());
+        assert_eq!(title.range.start.line, 3);
+
+        assert!(definition_at(2, 11).is_none());
+
+        let scope_namespace = definition_at(4, 41).unwrap();
+        assert_eq!(
+            scope_namespace.uri,
+            Url::from_file_path(&other_path).unwrap()
+        );
+        let scope_page = definition_at(4, 47).unwrap();
+        assert_eq!(scope_page.uri, Url::from_file_path(&other_path).unwrap());
+        assert_eq!(scope_page.range.start.line, 1);
+        let scope_section = definition_at(4, 52).unwrap();
+        assert_eq!(scope_section.range.start.line, 2);
+        let scoped_leaf = definition_at(5, 16).unwrap();
+        assert_eq!(scoped_leaf.uri, Url::from_file_path(&other_path).unwrap());
+        assert_eq!(scoped_leaf.range.start.line, 3);
+
+        let notifications = diagnostic_notifications(&workspace, &Mutex::new(HashMap::new()));
+        let missing = notifications
+            .iter()
+            .flat_map(|notification| {
+                serde_json::from_value::<PublishDiagnosticsParams>(notification.params.clone())
+                    .unwrap()
+                    .diagnostics
+            })
+            .filter(|diagnostic| {
+                diagnostic.code == Some(NumberOrString::String("missing-translation-key".into()))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(missing.len(), 2);
+        assert!(
+            missing
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("common:Page.missing.key"))
+        );
+        assert!(
+            missing
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("unknown:Page.section"))
+        );
+    }
+
+    #[test]
+    fn scoped_position_resolution_supports_custom_separators() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("locale-breeze.json"),
+            r#"{
+              "dictionaries":"translation.{locale}.json",
+              "defaultLocale":"en",
+              "keySeparator":"/",
+              "scopedFunctions":[{"functionName":"useScopedTranslation","translationMethod":"t"}]
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("translation.en.json"),
+            r#"{"Page":{"section":{"child":{"title":"Title"}}}}"#,
+        )
+        .unwrap();
+        let source_path = temp.path().join("app.ts");
+        let source = "const i18n=useScopedTranslation('Page'); i18n.t('section/child/title')";
+        std::fs::write(&source_path, source).unwrap();
+        let workspace = WorkspaceIndex::load(
+            temp.path().to_owned(),
+            &temp.path().join("locale-breeze.json"),
+        )
+        .unwrap();
+        let snapshot = workspace.snapshot();
+        let uri = Url::from_file_path(source_path).unwrap();
+        let child = source.find("child").unwrap() as u32 + 2;
+        let target = source_target_at_position(&snapshot, &uri, Position::new(0, child), "/");
+        assert_eq!(
+            target,
+            Some(SourcePositionTarget::Key {
+                qualified: QualifiedKey::new(
+                    None,
+                    CanonicalKey::new("Page/section/child", "/").unwrap(),
+                ),
+                complete: false,
+            })
+        );
     }
 
     #[test]
