@@ -12,6 +12,7 @@ import com.intellij.openapi.components.service
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.LocalFileSystem
+import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.wm.ToolWindowManager
 import com.intellij.platform.lsp.api.LspClientManager
 import com.intellij.psi.search.FilenameIndex
@@ -125,14 +126,15 @@ class LocaleBreezeConfigDiscovery(private val project: Project) {
         val root = projectRoot() ?: return
         val config = root.resolve(CONFIG_FILE_NAME)
         generation.incrementAndGet()
-        WriteAction.run<RuntimeException> {
+        val file = WriteAction.compute<VirtualFile?, RuntimeException> {
             if (!Files.exists(config)) Files.writeString(config, STARTER_CONFIG)
+            LocalFileSystem.getInstance().refreshAndFindFileByNioFile(config)
         }
         val settings = LocaleBreezeSettings.getInstance(project)
         settings.state.configLocation = LocaleBreezeSettings.ConfigLocation.WORKSPACE_ROOT.name
         settings.setActivationMode(LocaleBreezeSettings.ActivationMode.AUTO)
-        LocalFileSystem.getInstance().refreshAndFindFileByNioFile(config)?.let { file ->
-            OpenFileDescriptor(project, file).navigate(true)
+        file?.let {
+            OpenFileDescriptor(project, it).navigate(true)
         }
         activate(LocaleBreezeConfigSetupState.RootConfig(config.toString()), restart = true)
     }

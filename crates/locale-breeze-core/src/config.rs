@@ -15,7 +15,9 @@ pub struct Config {
     pub default_namespace: Option<String>,
     #[serde(default = "default_separator")]
     pub key_separator: String,
+    #[serde(default)]
     pub scoped_functions: Vec<ScopedFunctionConfig>,
+    #[serde(default)]
     pub full_key_functions: Vec<FullKeyFunctionConfig>,
     #[serde(default)]
     pub translation_key_types: Vec<String>,
@@ -119,12 +121,6 @@ impl Config {
         }
         if self.key_separator.is_empty() {
             return Err(ConfigError::Empty("keySeparator"));
-        }
-        if self.scoped_functions.is_empty() {
-            return Err(ConfigError::Empty("scopedFunctions"));
-        }
-        if self.full_key_functions.is_empty() {
-            return Err(ConfigError::Empty("fullKeyFunctions"));
         }
         let mut scoped_names = HashSet::new();
         for function in &self.scoped_functions {
@@ -444,6 +440,20 @@ mod tests {
         }))
         .unwrap();
         assert!(config.ignored_scopes.is_empty());
+    }
+
+    #[test]
+    fn function_lists_and_key_separator_are_optional() {
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "dictionaries": "translation.{locale}.json",
+            "defaultLocale": "en"
+        }))
+        .unwrap();
+
+        config.validate().unwrap();
+        assert!(config.scoped_functions.is_empty());
+        assert!(config.full_key_functions.is_empty());
+        assert_eq!(config.key_separator, ".");
     }
 
     #[test]

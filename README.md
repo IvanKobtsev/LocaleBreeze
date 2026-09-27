@@ -58,7 +58,7 @@ Copy `locale-breeze.example.json` to `locale-breeze.json` at the workspace root 
 
 LocaleBreeze automatically recognizes literal calls to `useTranslation` from `react-i18next` and `i18next.t` from `i18next`. Namespace arrays, computed namespaces and computed `keyPrefix` values are intentionally not resolved.
 
-Custom functions are configured independently. Scoped functions may declare one returned translation method and one returned key method, while both scoped and full-key functions may override the global namespace. Translation methods validate interpolation options; key methods only resolve and track keys:
+Custom functions are configured independently. Scoped functions may declare one returned translation method and one returned key method, while both scoped and full-key functions may override the global namespace. Translation methods validate interpolation options; key methods only resolve and track keys. Both `scopedFunctions` and `fullKeyFunctions` are optional and default to empty lists. `keySeparator` is also optional and defaults to `.`:
 
 ```json
 {

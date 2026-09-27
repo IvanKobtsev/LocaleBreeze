@@ -4,7 +4,7 @@
   "title": "LocaleBreeze configuration",
   "type": "object",
   "additionalProperties": false,
-  "required": ["dictionaries", "defaultLocale", "scopedFunctions", "fullKeyFunctions"],
+  "required": ["dictionaries", "defaultLocale"],
   "properties": {
     "$schema": { "type": "string" },
     "dictionaries": { "type": "string", "description": "Pattern relative to the workspace root containing exactly one {locale} token and optionally one {namespace} token. Absolute paths are not allowed; parent-directory (..) segments may reference dictionaries outside the workspace." },
@@ -12,11 +12,11 @@
     "defaultNamespace": { "type": "string", "minLength": 1, "description": "Default i18next namespace. Required when {namespace} matches more than one namespace; inferred when exactly one is found." },
     "keySeparator": { "type": "string", "minLength": 1, "default": "." },
     "scopedFunctions": {
-      "type": "array", "minItems": 1,
+      "type": "array", "default": [],
       "items": { "$ref": "#/$defs/scopedFunction" }
     },
     "fullKeyFunctions": {
-      "type": "array", "minItems": 1,
+      "type": "array", "default": [],
       "items": { "$ref": "#/$defs/fullKeyFunction" }
     },
     "translationKeyTypes": { "$ref": "#/$defs/optionalConventions" },
