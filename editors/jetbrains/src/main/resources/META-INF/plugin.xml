@@ -3,8 +3,54 @@
   <name>LocaleBreeze</name>
   <vendor url="https://github.com/IvanKobtsev/LocaleBreeze">Ivan Kobtsev</vendor>
   <description><![CDATA[
-    Context-aware i18n completion, navigation, references, unused-key hints, and persistent workspace health powered by the LocaleBreeze language server.
+    <p>
+      <strong>LocaleBreeze turns i18next translation keys into IDE-aware symbols.</strong>
+      It infers the namespace and key scope from your code, understands which dictionary entry each
+      key refers to, and connects translation calls with their JSON definitions—without running a
+      full TypeScript type checker.
+    </p>
+    <ul>
+      <li>
+        <strong>Infer key context:</strong> understands <code>useTranslation</code>,
+        <code>i18next.t</code>, namespaces, <code>keyPrefix</code>, and configurable scoped or
+        full-key translation functions.
+      </li>
+      <li>
+        <strong>Navigate in both directions:</strong> go from a translation call to its JSON entry,
+        or from a dictionary key to a popup containing every indexed usage.
+      </li>
+      <li>
+        <strong>Find and count usages:</strong> see how many references a key has and open each
+        source location with its file, line number, and code preview.
+      </li>
+      <li>
+        <strong>Catch translation problems:</strong> highlights missing keys, invalid interpolation
+        arguments, ignored-scope references, and optionally unused dictionary keys and scopes.
+      </li>
+      <li>
+        <strong>Complete the right key:</strong> suggests full, relative, and partial keys using the
+        namespace and translator scope inferred at the cursor.
+      </li>
+      <li>
+        <strong>Understand values at a glance:</strong> hover over a key to preview its default-locale
+        translation or inspect the children of a scope.
+      </li>
+      <li>
+        <strong>Monitor project health:</strong> view dictionary and key totals, unused-key counts,
+        configuration issues, and an on-demand report for invalid usages.
+      </li>
+    </ul>
   ]]></description>
+  <change-notes><![CDATA[
+    <h2>0.3.0</h2>
+    <ul>
+      <li>New tool window that shows status and can generate project health report.</li>
+      <li>Now supporting multiple namespaces.</li>
+      <li>Added missing-key, missing interpolation argument diagnostics.</li>
+      <li>Added workspace metrics and an on-demand project health report to the tool window.</li>
+      <li>Added automatic configuration discovery, starter configuration creation, and support for external dictionary directories.</li>
+    </ul>
+  ]]></change-notes>
   <depends>com.intellij.modules.platform</depends>
   <depends>com.intellij.modules.ultimate</depends>
   <depends>com.intellij.modules.lsp</depends>
