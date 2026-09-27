@@ -136,7 +136,7 @@ private object LocaleBreezeLspCustomization : LspCustomization() {
     override val goToDefinitionCustomizer = LspGoToDefinitionDisabled
 }
 
-internal object LocaleBreezeExecutable {
+private object LocaleBreezeExecutable {
     private val log = Logger.getInstance(LocaleBreezeExecutable::class.java)
 
     fun resolve(project: Project): Path? {

@@ -10,7 +10,6 @@ import com.intellij.ui.TitledSeparator
 import com.intellij.util.ui.JBUI
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
-import java.awt.Insets
 import javax.swing.JComponent
 import javax.swing.JLabel
 import javax.swing.JCheckBox
@@ -27,8 +26,6 @@ class LocaleBreezeConfigurable(private val project: Project) : Configurable {
     private val customPath = JRadioButton("Custom path")
     private val customPathLabel = JLabel("Path:")
     private val configPath = TextFieldWithBrowseButton()
-    private val developmentServerLabel = JLabel("Development language server executable:")
-    private val developmentServerPath = TextFieldWithBrowseButton()
     private val showUnusedKeys = JCheckBox("Show unused keys")
     private var panel: JPanel? = null
 
@@ -46,10 +43,6 @@ class LocaleBreezeConfigurable(private val project: Project) : Configurable {
             project,
             FileChooserDescriptor(true, false, false, false, false, false)
                 .withFileFilter { it.extension.equals("json", ignoreCase = true) },
-        )
-        developmentServerPath.addBrowseFolderListener(
-            project,
-            FileChooserDescriptor(true, false, false, false, false, false),
         )
         reset()
         return JPanel(GridBagLayout()).also { created ->
@@ -78,19 +71,6 @@ class LocaleBreezeConfigurable(private val project: Project) : Configurable {
             constraints.weightx = 1.0
             created.add(configPath, constraints)
             constraints.gridx = 0
-            if (LocaleBreezeDevelopment.enabled) {
-                constraints.gridy = row++
-                constraints.gridwidth = 2
-                created.add(developmentSection, constraints)
-                constraints.gridy = row++
-                constraints.gridwidth = 1
-                constraints.weightx = 0.0
-                created.add(developmentServerLabel, constraints)
-                constraints.gridx = 1
-                constraints.weightx = 1.0
-                created.add(developmentServerPath, constraints)
-                constraints.gridx = 0
-            }
             constraints.gridy = row++
             constraints.gridwidth = 2
             constraints.weightx = 1.0
@@ -113,8 +93,6 @@ class LocaleBreezeConfigurable(private val project: Project) : Configurable {
         return enabled.isSelected != settings.isEnabledInSettings() ||
             selectedConfigLocation() != settings.configLocation() ||
             configPath.text.trim() != state.configPath ||
-            (LocaleBreezeDevelopment.enabled &&
-                developmentServerPath.text.trim() != state.developmentServerPath) ||
             showUnusedKeys.isSelected != LocaleBreezePreferences.getInstance().state.showUnusedKeys
     }
 
@@ -134,9 +112,6 @@ class LocaleBreezeConfigurable(private val project: Project) : Configurable {
             .normalizeForStorage(configPath.text.trim())
         state.configLocation = selectedConfigLocation().name
         configPath.text = state.configPath
-        if (LocaleBreezeDevelopment.enabled) {
-            state.developmentServerPath = developmentServerPath.text.trim()
-        }
         LocaleBreezePreferences.getInstance().setShowUnusedKeys(showUnusedKeys.isSelected)
         project.service<LocaleBreezeConfigDiscovery>().refresh(true)
     }
@@ -149,7 +124,6 @@ class LocaleBreezeConfigurable(private val project: Project) : Configurable {
         customPath.isSelected = !workspaceRoot.isSelected
         configPath.text = state.configPath
         updateConfigPathVisibility()
-        developmentServerPath.text = state.developmentServerPath
         showUnusedKeys.isSelected = LocaleBreezePreferences.getInstance().state.showUnusedKeys
         updateOptionsEnabled()
     }
@@ -180,8 +154,6 @@ class LocaleBreezeConfigurable(private val project: Project) : Configurable {
         customPath.isEnabled = workspaceEnabled
         customPathLabel.isEnabled = workspaceEnabled
         configPath.isEnabled = workspaceEnabled && customPath.isSelected
-        developmentServerLabel.isEnabled = workspaceEnabled
-        developmentServerPath.isEnabled = workspaceEnabled
         showUnusedKeys.isEnabled = workspaceEnabled
     }
 }

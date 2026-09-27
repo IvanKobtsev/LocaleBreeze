@@ -16,7 +16,7 @@ repositories {
 dependencies {
     intellijPlatform {
         webstorm("2026.2.1")
-        plugin("com.redhat.devtools.lsp4ij", "0.20.1")
+        bundledPlugin("JavaScript")
         testFramework(TestFrameworkType.Platform)
     }
     testImplementation(kotlin("test"))
@@ -52,14 +52,6 @@ intellijPlatform {
         ideaVersion {
             sinceBuild = "262.9437.145"
             untilBuild = "262.*"
-        }
-    }
-}
-
-intellijPlatformTesting {
-    pluginVerification {
-        ides {
-            androidStudio("2026.2.1.5")
         }
     }
 }
