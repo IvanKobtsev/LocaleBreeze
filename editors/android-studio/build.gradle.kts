@@ -1,6 +1,7 @@
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
 import org.jetbrains.intellij.platform.gradle.IntelliJPlatformType
 import org.jetbrains.intellij.platform.gradle.tasks.PrepareSandboxTask
+import org.jetbrains.intellij.platform.gradle.tasks.RunIdeTask
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
@@ -41,12 +42,17 @@ val buildDevelopmentServer by tasks.registering(Exec::class) {
     commandLine("cargo", "build", "-p", "locale-breeze")
 }
 
-tasks.named<JavaExec>("runIde") {
+tasks.named<RunIdeTask>("runIde") {
     dependsOn(buildDevelopmentServer)
     jvmArgs(
         "-Ddev.localebreeze.development=true",
         "-Ddev.localebreeze.server=${developmentServer.asFile.absolutePath}",
     )
+    doFirst {
+        // Android Studio's What's New assistant resolves this directory with
+        // toRealPath() during first startup instead of creating it itself.
+        sandboxSystemDirectory.get().dir("whatsnew").asFile.mkdirs()
+    }
 }
 
 intellijPlatform {
