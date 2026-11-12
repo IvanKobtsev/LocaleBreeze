@@ -73,7 +73,7 @@ function stageJetBrainsBinaries() {
 }
 
 function packageWebStorm() {
-  packageJetBrainsPlugin(webstormRoot, 'locale-breeze-jetbrains', 'locale-breeze-webstorm', []);
+  packageJetBrainsPlugin(webstormRoot, 'locale-breeze-jetbrains', 'locale-breeze-webstorm', [], 1, true);
 }
 
 function packageAndroidStudio() {
@@ -82,19 +82,22 @@ function packageAndroidStudio() {
   ], 3);
 }
 
-function packageJetBrainsPlugin(pluginRoot, builtName, artifactName, extraTasks, attempts = 1) {
+function packageJetBrainsPlugin(pluginRoot, builtName, artifactName, extraTasks, attempts = 1, variants = false) {
   const wrapper = join(pluginRoot, process.platform === 'win32' ? 'gradlew.bat' : 'gradlew');
   if (process.platform !== 'win32') chmodSync(wrapper, 0o755);
   runWithRetries(wrapper, [
-    'buildPlugin', 'test', 'verifyPluginStructure', 'verifyBundledBinaries', ...extraTasks,
+    variants ? 'buildPluginVariants' : 'buildPlugin', 'test', 'verifyPluginStructure', 'verifyBundledBinaries', ...extraTasks,
     '--rerun-tasks', '--no-configuration-cache',
   ], pluginRoot, attempts);
   const version = readProperties(join(pluginRoot, 'gradle.properties')).version;
-  const built = join(pluginRoot, 'build', 'distributions', `${builtName}-${version}.zip`);
-  requireNonEmpty(built);
-  const artifact = join(output, `${artifactName}-${version}.zip`);
-  copyFileSync(built, artifact);
-  requireNonEmpty(artifact);
+  const suffixes = variants ? ['-windows-x86_64', '-windows-arm64', '-mac-x86_64', '-mac-arm64', '-linux-x86_64', '-linux-arm64'] : [''];
+  for (const suffix of suffixes) {
+    const built = join(pluginRoot, 'build', 'distributions', builtName + '-' + version + suffix + '.zip');
+    requireNonEmpty(built);
+    const artifact = join(output, artifactName + '-' + version + suffix + '.zip');
+    copyFileSync(built, artifact);
+    requireNonEmpty(artifact);
+  }
 }
 
 function command(name) { return process.platform === 'win32' ? `${name}.cmd` : name; }

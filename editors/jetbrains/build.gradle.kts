@@ -1,13 +1,13 @@
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
 import org.jetbrains.intellij.platform.gradle.IntelliJPlatformType
-import org.jetbrains.intellij.platform.gradle.tasks.PrepareSandboxTask
+import org.jetbrains.intellij.platform.gradle.tasks.BuildPluginVariantsTask
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.dsl.JvmDefaultMode
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
 plugins {
     id("org.jetbrains.kotlin.jvm") version "2.3.20"
-    id("org.jetbrains.intellij.platform") version "2.18.1"
+    id("org.jetbrains.intellij.platform") version "2.20.1"
 }
 
 repositories {
@@ -65,39 +65,34 @@ intellijPlatform {
     }
 }
 
-val nativeBinaries = layout.buildDirectory.dir("generated-native-binaries")
-
-val prepareNativeBinaries by tasks.registering(Copy::class) {
-    from(rootProject.layout.projectDirectory.dir("../../dist/jetbrains"))
-    into(nativeBinaries)
-}
-
-tasks.withType<PrepareSandboxTask>().configureEach {
-    dependsOn(prepareNativeBinaries)
-    from(nativeBinaries) {
-        into(pluginName.map { "$it/bin" })
+intellijPlatform {
+    nativeVariants {
+        enabled = true
+        windows.x86_64.from(repositoryRoot.dir("dist/jetbrains")) { include("win32-x64/**"); into("bin") }
+        windows.arm64.from(repositoryRoot.dir("dist/jetbrains")) { include("win32-arm64/**"); into("bin") }
+        mac.x86_64.from(repositoryRoot.dir("dist/jetbrains")) { include("darwin-x64/**"); into("bin") }
+        mac.arm64.from(repositoryRoot.dir("dist/jetbrains")) { include("darwin-arm64/**"); into("bin") }
+        linux.x86_64.from(repositoryRoot.dir("dist/jetbrains")) { include("linux-x64/**"); into("bin") }
+        linux.arm64.from(repositoryRoot.dir("dist/jetbrains")) { include("linux-arm64/**"); into("bin") }
     }
 }
 
 val verifyBundledBinaries by tasks.registering {
-    dependsOn(tasks.named("buildPlugin"))
+    val variants = tasks.named<BuildPluginVariantsTask>("buildPluginVariants")
+    dependsOn(variants)
+    inputs.files(variants.map { it.archiveFiles })
     doLast {
-        val archive = tasks.named<Zip>("buildPlugin").get().archiveFile.get().asFile
-        val entries = mutableSetOf<String>()
-        zipTree(archive).visit {
-            if (!isDirectory) entries += relativePath.pathString.replace('\\', '/')
-        }
-        val expected = mapOf(
-            "win32-x64" to "locale-breeze.exe",
-            "win32-arm64" to "locale-breeze.exe",
-            "darwin-x64" to "locale-breeze",
-            "darwin-arm64" to "locale-breeze",
-            "linux-x64" to "locale-breeze",
-            "linux-arm64" to "locale-breeze",
-        )
-        for ((target, binary) in expected) {
-            check(entries.any { it.endsWith("/bin/$target/$binary") }) {
-                "Plugin archive is missing executable: bin/$target/$binary"
+        val targets = mapOf("windows-x86_64" to "win32-x64", "windows-arm64" to "win32-arm64", "mac-x86_64" to "darwin-x64", "mac-arm64" to "darwin-arm64", "linux-x86_64" to "linux-x64", "linux-arm64" to "linux-arm64")
+        val archives = variants.get().archiveFiles.files.associateBy { it.name }
+        check(archives.keys == targets.keys.map { "${project.name}-${project.version}-$it.zip" }.toSet())
+        for ((target, directory) in targets) {
+            val archive = archives.getValue("${project.name}-${project.version}-$target.zip")
+            val binary = if (directory.startsWith("win32-")) "locale-breeze.exe" else "locale-breeze"
+            java.util.zip.ZipFile(archive).use { zip ->
+                val binaries = zip.entries().asSequence().filter { !it.isDirectory && "/bin/" in it.name }.toList()
+                check(binaries.size == 1 && binaries.single().name.endsWith("/bin/$directory/$binary") && binaries.single().size > 0) {
+                    "${archive.name} must contain only the $directory language server"
+                }
             }
         }
     }

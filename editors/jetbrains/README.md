@@ -1,6 +1,6 @@
 # LocaleBreeze for WebStorm
 
-This is a thin WebStorm launcher for the LocaleBreeze Rust language server. The current release targets WebStorm 2026.2.1 through the end of the 2026.2 line.
+This is a thin WebStorm launcher for the LocaleBreeze Rust language server. The current release targets WebStorm 2026.2.1 through the end of the 2026.3 line.
 
 ## Development
 
@@ -10,7 +10,7 @@ When the configured dictionary directory is outside the WebStorm project content
 
 ## Native binaries
 
-One JetBrains plugin archive is cross-platform, so release builds bundle all six binaries under:
+WebStorm releases use six native variants, each bundling only its matching language server. Binaries are staged under:
 
 ```text
 dist/jetbrains/
@@ -22,6 +22,6 @@ dist/jetbrains/
   linux-arm64/locale-breeze
 ```
 
-The Gradle build copies that tree into the plugin's `bin/` directory.
+Gradle `buildPluginVariants` creates Windows, macOS, and Linux ZIPs for x86_64 and ARM64. Each declares matching OS and architecture requirements under the same plugin ID and uses a platform-suffixed version, preserving its `bin/<platform>/` path.
 
-From the repository root, run `node scripts/package-editors.mjs`. It validates all native binaries, creates six platform-specific VSIX files, bundles every binary into the JetBrains ZIP, and verifies the JetBrains archive structure. Artifacts are written to `dist/editors/`.
+From the repository root, run `node scripts/package-editors.mjs`. It validates all native binaries, creates six platform-specific VSIX files, creates six platform-specific WebStorm ZIPs (Android Studio remains universal), and verifies the JetBrains archive structure. Artifacts are written to `dist/editors/`.
