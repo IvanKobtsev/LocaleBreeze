@@ -1,4 +1,5 @@
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
+import org.jetbrains.intellij.platform.gradle.IntelliJPlatformType
 import org.jetbrains.intellij.platform.gradle.tasks.PrepareSandboxTask
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.dsl.JvmDefaultMode
@@ -53,7 +54,13 @@ intellijPlatform {
     pluginConfiguration {
         ideaVersion {
             sinceBuild = "262.9437.145"
-            untilBuild = "262.*"
+            untilBuild = "263.*"
+        }
+    }
+    pluginVerification {
+        ides {
+            create(IntelliJPlatformType.WebStorm, "2026.2.1")
+            create(IntelliJPlatformType.WebStorm, "2026.3")
         }
     }
 }
