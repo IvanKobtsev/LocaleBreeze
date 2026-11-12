@@ -1,3 +1,4 @@
+import java.util.zip.ZipFile
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
 import org.jetbrains.intellij.platform.gradle.IntelliJPlatformType
 import org.jetbrains.intellij.platform.gradle.tasks.BuildPluginVariantsTask
@@ -65,15 +66,42 @@ intellijPlatform {
     }
 }
 
+val nativeBundles = mapOf(
+    "windows-x86_64" to tasks.register<Sync>("stageNativewindows_x86_64") {
+        from(repositoryRoot.dir("dist/jetbrains/win32-x64")) { into("bin/win32-x64") }
+        into(layout.buildDirectory.dir("native-variants/windows-x86_64"))
+    },
+    "windows-arm64" to tasks.register<Sync>("stageNativewindows_arm64") {
+        from(repositoryRoot.dir("dist/jetbrains/win32-arm64")) { into("bin/win32-arm64") }
+        into(layout.buildDirectory.dir("native-variants/windows-arm64"))
+    },
+    "mac-x86_64" to tasks.register<Sync>("stageNativemac_x86_64") {
+        from(repositoryRoot.dir("dist/jetbrains/darwin-x64")) { into("bin/darwin-x64") }
+        into(layout.buildDirectory.dir("native-variants/mac-x86_64"))
+    },
+    "mac-arm64" to tasks.register<Sync>("stageNativemac_arm64") {
+        from(repositoryRoot.dir("dist/jetbrains/darwin-arm64")) { into("bin/darwin-arm64") }
+        into(layout.buildDirectory.dir("native-variants/mac-arm64"))
+    },
+    "linux-x86_64" to tasks.register<Sync>("stageNativelinux_x86_64") {
+        from(repositoryRoot.dir("dist/jetbrains/linux-x64")) { into("bin/linux-x64") }
+        into(layout.buildDirectory.dir("native-variants/linux-x86_64"))
+    },
+    "linux-arm64" to tasks.register<Sync>("stageNativelinux_arm64") {
+        from(repositoryRoot.dir("dist/jetbrains/linux-arm64")) { into("bin/linux-arm64") }
+        into(layout.buildDirectory.dir("native-variants/linux-arm64"))
+    }
+)
+
 intellijPlatform {
     nativeVariants {
         enabled = true
-        windows.x86_64.from(repositoryRoot.dir("dist/jetbrains")) { include("win32-x64/**"); into("bin") }
-        windows.arm64.from(repositoryRoot.dir("dist/jetbrains")) { include("win32-arm64/**"); into("bin") }
-        mac.x86_64.from(repositoryRoot.dir("dist/jetbrains")) { include("darwin-x64/**"); into("bin") }
-        mac.arm64.from(repositoryRoot.dir("dist/jetbrains")) { include("darwin-arm64/**"); into("bin") }
-        linux.x86_64.from(repositoryRoot.dir("dist/jetbrains")) { include("linux-x64/**"); into("bin") }
-        linux.arm64.from(repositoryRoot.dir("dist/jetbrains")) { include("linux-arm64/**"); into("bin") }
+        windows.x86_64.from(nativeBundles.getValue("windows-x86_64"))
+        windows.arm64.from(nativeBundles.getValue("windows-arm64"))
+        mac.x86_64.from(nativeBundles.getValue("mac-x86_64"))
+        mac.arm64.from(nativeBundles.getValue("mac-arm64"))
+        linux.x86_64.from(nativeBundles.getValue("linux-x86_64"))
+        linux.arm64.from(nativeBundles.getValue("linux-arm64"))
     }
 }
 
@@ -88,7 +116,7 @@ val verifyBundledBinaries by tasks.registering {
         for ((target, directory) in targets) {
             val archive = archives.getValue("${project.name}-${project.version}-$target.zip")
             val binary = if (directory.startsWith("win32-")) "locale-breeze.exe" else "locale-breeze"
-            java.util.zip.ZipFile(archive).use { zip ->
+            ZipFile(archive).use { zip ->
                 val binaries = zip.entries().asSequence().filter { !it.isDirectory && "/bin/" in it.name }.toList()
                 check(binaries.size == 1 && binaries.single().name.endsWith("/bin/$directory/$binary") && binaries.single().size > 0) {
                     "${archive.name} must contain only the $directory language server"
